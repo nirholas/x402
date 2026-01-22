@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -33,7 +33,7 @@ import "./interfaces/IUSDs.sol";
 contract ToolRegistry is
     Initializable,
     OwnableUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuard,
     PausableUpgradeable,
     UUPSUpgradeable,
     IToolRegistry
@@ -130,9 +130,7 @@ contract ToolRegistry is
         }
 
         __Ownable_init(msg.sender);
-        __ReentrancyGuard_init();
         __Pausable_init();
-        __UUPSUpgradeable_init();
 
         platformWallet = _platformWallet;
         platformFeeBps = _platformFeeBps;

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -36,7 +36,7 @@ import "./interfaces/IUSDs.sol";
 contract X402PaymentChannel is
     Initializable,
     OwnableUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuard,
     PausableUpgradeable,
     UUPSUpgradeable,
     EIP712Upgradeable,
@@ -130,9 +130,7 @@ contract X402PaymentChannel is
      */
     function initialize() public initializer {
         __Ownable_init(msg.sender);
-        __ReentrancyGuard_init();
         __Pausable_init();
-        __UUPSUpgradeable_init();
         __EIP712_init("X402PaymentChannel", "1");
 
         // Add USDs as default supported token

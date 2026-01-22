@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -42,7 +42,7 @@ import "./ToolRegistry.sol";
 contract X402CreditSystem is
     Initializable,
     OwnableUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuard,
     PausableUpgradeable,
     UUPSUpgradeable,
     IX402CreditSystem
@@ -148,9 +148,7 @@ contract X402CreditSystem is
         if (_platformFeeBps > 1000) revert InvalidAmount(); // Max 10%
 
         __Ownable_init(msg.sender);
-        __ReentrancyGuard_init();
         __Pausable_init();
-        __UUPSUpgradeable_init();
 
         toolRegistry = ToolRegistry(_toolRegistry);
         platformWallet = _platformWallet;

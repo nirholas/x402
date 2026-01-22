@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -36,7 +36,7 @@ import "./interfaces/IUSDs.sol";
 contract X402Subscription is
     Initializable,
     OwnableUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuard,
     PausableUpgradeable,
     UUPSUpgradeable,
     IX402Subscription
@@ -150,9 +150,7 @@ contract X402Subscription is
      */
     function initialize() public initializer {
         __Ownable_init(msg.sender);
-        __ReentrancyGuard_init();
         __Pausable_init();
-        __UUPSUpgradeable_init();
 
         // Add USDs as default supported token
         supportedTokens[USDS] = true;

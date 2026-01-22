@@ -8,6 +8,21 @@ optimizer_runs = 200
 via_ir = true
 evm_version = "cancun"
 
+# Remappings for OpenZeppelin
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+    "forge-std/=lib/forge-std/src/"
+]
+
+# Exclude certora and test directories from compilation
+exclude = [
+    "lib/openzeppelin-contracts/certora",
+    "lib/openzeppelin-contracts-upgradeable/certora",
+    "lib/openzeppelin-contracts-upgradeable/lib",
+    "lib/openzeppelin-contracts-upgradeable/test"
+]
+
 # Arbitrum specific settings
 gas_limit = 1099511627775
 block_gas_limit = 1125899906842624
@@ -15,11 +30,6 @@ block_gas_limit = 1125899906842624
 # Testing
 fuzz = { runs = 256 }
 invariant = { runs = 256 }
-
-# Formatting
-line_length = 120
-tab_width = 4
-bracket_spacing = true
 
 [profile.ci]
 fuzz = { runs = 1000 }
