@@ -45,11 +45,11 @@ export function PaymentModal({
   const [txHash, setTxHash] = useState('');
 
   const PAYMENT_TOKENS = [
+    { symbol: 'USDs', name: 'Sperax USD (Yield-Bearing)', decimals: 18, featured: true, apy: '~10%' },
     { symbol: 'USDC', name: 'USD Coin', decimals: 6 },
     { symbol: 'USDT', name: 'Tether USD', decimals: 6 },
     { symbol: 'DAI', name: 'Dai Stablecoin', decimals: 18 },
     { symbol: 'ETH', name: 'Ethereum', decimals: 18 },
-    { symbol: 'BNB', name: 'BNB', decimals: 18 },
     { symbol: 'MATIC', name: 'Polygon', decimals: 18 },
   ];
 
