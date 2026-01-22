@@ -1,10 +1,4 @@
 /**
- * @fileoverview arbitrum-adapter module implementation
- * @copyright Copyright (c) 2024-2026 nirholas
- * @license MIT
- */
-
-/**
  * Arbitrum X402 Adapter
  * 
  * Specialized adapter for X402 payments on Arbitrum with:
@@ -377,70 +371,13 @@ export class ArbitrumX402Adapter {
 
   /**
    * Get accumulated yield for USDs holder
-   * USDs automatically rebases, so yield is reflected in balance changes
    */
   async getUSdsYield(address: Address): Promise<string> {
-    // USDs auto-rebases - yield is reflected in balance changes over time
-    // To accurately calculate yield, we need to track historical balances
-    // For now, we query the USDs contract for the rebasing info
-    
-    try {
-      const currentBalance = await this.getUSdsBalance(address);
-      
-      // Query the USDs rebasing data from contract
-      // The contract tracks global yield index and per-user credits
-      const usdsContract = {
-        address: SPERAX_USD_ADDRESS,
-        abi: [
-          {
-            name: 'rebasingCreditsPerTokenHighres',
-            type: 'function',
-            stateMutability: 'view',
-            inputs: [],
-            outputs: [{ type: 'uint256' }],
-          },
-          {
-            name: 'creditBalanceOf',
-            type: 'function',
-            stateMutability: 'view',
-            inputs: [{ type: 'address', name: 'account' }],
-            outputs: [{ type: 'uint256' }, { type: 'uint256' }],
-          },
-        ] as const,
-      };
-      
-      // Get user's credit balance and credit per token ratio
-      const [creditBalance, creditPerToken] = await this.publicClient.readContract({
-        ...usdsContract,
-        functionName: 'creditBalanceOf',
-        args: [address],
-      }) as [bigint, bigint];
-      
-      // If user has never held USDs, no yield
-      if (creditBalance === 0n) {
-        return '0';
-      }
-      
-      // Get current global rebasing credits per token
-      const globalCreditsPerToken = await this.publicClient.readContract({
-        ...usdsContract,
-        functionName: 'rebasingCreditsPerTokenHighres',
-      }) as bigint;
-      
-      // Calculate accumulated yield
-      // Yield = CurrentBalance - (CreditBalance / GlobalCreditsPerToken * 10^18)
-      const currentBalanceBigInt = parseUnits(currentBalance.formattedBalance, 18);
-      const originalDeposit = (creditBalance * 10n ** 18n) / globalCreditsPerToken;
-      const yieldAmount = currentBalanceBigInt > originalDeposit 
-        ? currentBalanceBigInt - originalDeposit 
-        : 0n;
-      
-      return formatUnits(yieldAmount, 18);
-    } catch (error) {
-      // If contract calls fail, return 0 with a warning
-      console.warn('Failed to calculate USDs yield:', error);
-      return '0';
-    }
+    // USDs automatically rebases, so yield is reflected in balance
+    // This would query historical balance to calculate yield
+    const currentBalance = await this.getUSdsBalance(address);
+    // TODO: Implement historical balance tracking for yield calculation
+    return '0'; // Placeholder
   }
 
   /**

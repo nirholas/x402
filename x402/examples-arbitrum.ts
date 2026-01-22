@@ -1,10 +1,4 @@
 /**
- * @fileoverview examples-arbitrum module implementation
- * @copyright Copyright (c) 2024-2026 nirholas
- * @license MIT
- */
-
-/**
  * X402 Arbitrum Examples
  * 
  * Comprehensive examples for using X402 payments on Arbitrum with:

@@ -1,10 +1,4 @@
 /**
- * @fileoverview mock-facilitator module implementation
- * @copyright Copyright (c) 2024-2026 nirholas
- * @license MIT
- */
-
-/**
  * Mock Facilitator Server for X402 Testing
  * 
  * Simulates payment verification and settlement endpoints

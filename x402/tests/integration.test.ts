@@ -1,10 +1,4 @@
 /**
- * @fileoverview Test suite
- * @copyright Copyright (c) 2024-2026 nirholas
- * @license MIT
- */
-
-/**
  * Arbitrum X402 Integration Tests
  * 
  * End-to-end tests for complete payment flows

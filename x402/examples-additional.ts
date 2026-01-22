@@ -1,10 +1,4 @@
 /**
- * @fileoverview examples-additional module implementation
- * @copyright Copyright (c) 2024-2026 nirholas
- * @license MIT
- */
-
-/**
  * Additional X402 Arbitrum Examples
  * 
  * Real-world use cases for X402 payment integration:
