@@ -85,6 +85,26 @@ export const DEFAULT_ASSETS: DefaultAssetTable<ExactDefaultAssetInfo> = {
       supportsEip2612: true,
     },
   ], // MegaETH mainnet MegaUSD (no EIP-3009, supports EIP-2612)
+  "eip155:4663": [
+    {
+      asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      name: "Global Dollar",
+      version: "1",
+      decimals: 6,
+      symbol: "USDG",
+      assetTransferMethod: "permit2",
+    },
+  ], // Robinhood Chain mainnet USDG (no EIP-3009, no EIP-2612)
+  "eip155:4663": [
+    {
+      asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      name: "Global Dollar",
+      version: "1",
+      decimals: 6,
+      symbol: "USDG",
+      assetTransferMethod: "permit2",
+    },
+  ], // Robinhood Chain mainnet USDG (no EIP-3009, no EIP-2612)
   "eip155:143": [
     {
       asset: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",

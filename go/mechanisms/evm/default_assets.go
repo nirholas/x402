@@ -35,6 +35,12 @@ var DefaultAssets = map[string][]DefaultAssetInfo{
 	"eip155:4326": {
 		{Asset: "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7", Name: "MegaUSD", Version: "1", Decimals: 18, Symbol: "MegaUSD", AssetTransferMethod: AssetTransferMethodPermit2, SupportsEip2612: true},
 	},
+	"eip155:4663": {
+		{Asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", Name: "Global Dollar", Version: "1", Decimals: 6, Symbol: "USDG", AssetTransferMethod: AssetTransferMethodPermit2},
+	},
+	"eip155:4663": {
+		{Asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", Name: "Global Dollar", Version: "1", Decimals: 6, Symbol: "USDG", AssetTransferMethod: AssetTransferMethodPermit2},
+	},
 	"eip155:143": {
 		{Asset: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", Name: "USDC", Version: "2", Decimals: 6, Symbol: "USDC"},
 	},

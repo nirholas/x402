@@ -74,6 +74,8 @@ var (
 	ChainIDBase          = big.NewInt(8453)
 	ChainIDBaseSepolia   = big.NewInt(84532)
 	ChainIDMegaETH       = big.NewInt(4326)
+	ChainIDRobinhood     = big.NewInt(4663)
+	ChainIDRobinhood     = big.NewInt(4663)
 	ChainIDMonad         = big.NewInt(143)
 	ChainIDMezo          = big.NewInt(31612)
 	ChainIDMezoTestnet   = big.NewInt(31611)
