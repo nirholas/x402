@@ -7,12 +7,19 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from ..schemas.hooks import (
+    CompletedSettlement,
+    PaymentCancellationDispatcher,
+    ProtectedRequestHookResult,
+)
+
 if TYPE_CHECKING:
     from ..schemas import (
         Network,
         PaymentPayload,
         PaymentRequirements,
         Price,
+        SettleResponse,
     )
 
 
@@ -81,6 +88,15 @@ class HTTPRequestContext:
 
 
 @dataclass
+class HTTPTransportContext:
+    """HTTP transport context for verify/settle hooks."""
+
+    request: HTTPRequestContext
+    response_body: Any = None
+    response_headers: dict[str, str] | None = None
+
+
+@dataclass
 class HTTPResponseInstructions:
     """Instructions for building HTTP response."""
 
@@ -104,6 +120,9 @@ class HTTPProcessResult:
     response: HTTPResponseInstructions | None = None
     payment_payload: PaymentPayload | None = None
     payment_requirements: PaymentRequirements | None = None
+    declared_extensions: dict[str, Any] | None = None
+    cancellation_dispatcher: PaymentCancellationDispatcher | None = None
+    before_handler_settlement: CompletedSettlement | None = None
 
 
 @dataclass
@@ -117,6 +136,7 @@ class ProcessSettleResult:
     network: str | None = None
     payer: str | None = None
     response: HTTPResponseInstructions | None = None  # Only set when success=False
+    settle_response: SettleResponse | None = None
 
 
 # ============================================================================
@@ -126,13 +146,20 @@ class ProcessSettleResult:
 
 @dataclass
 class PaywallConfig:
-    """Configuration for paywall UI customization."""
+    """Configuration for paywall UI customization.
+
+    ``faucet_urls`` is a per-chain override keyed by CAIP-2 network identifier
+    (e.g. ``"eip155:84532"``). Wins over the paywall's curated default map for
+    the matching chain. Unmapped chains render "No faucet configured." rather
+    than a fallback link.
+    """
 
     app_name: str | None = None
     app_logo: str | None = None
     session_token_endpoint: str | None = None
     current_url: str | None = None
     testnet: bool = False
+    faucet_urls: dict[str, str] | None = None
 
 
 # Dynamic function types (supports both sync and async callbacks)
@@ -172,17 +199,35 @@ class PaymentOption:
 
 @dataclass
 class RouteConfig:
-    """Configuration for a payment-protected route."""
+    """Configuration for a payment-protected route.
+
+    ``service_name``, ``tags``, and ``icon_url`` are forwarded as-is to
+    ``ResourceInfo`` for Bazaar discovery. ``RouteConfig`` itself does not
+    enforce indexer-side limits — the stricter ``resource_info`` helper path
+    soft-drops values that exceed Bazaar's caps (service_name ≤ 32 chars,
+    ≤ 5 tags of ≤ 32 chars each, absolute http(s) icon URLs ≤ 2048 chars).
+    Server authors should keep names short, tag sets small, and icon URLs
+    absolute http(s) to ensure listings are accepted by indexers.
+    """
 
     accepts: PaymentOption | list[PaymentOption]
     resource: str | None = None
     description: str | None = None
     mime_type: str | None = None
+    service_name: str | None = None
+    tags: list[str] | None = None
+    icon_url: str | None = None
     custom_paywall_html: str | None = None
     unpaid_response_body: UnpaidResponseBody | None = None
     settlement_failed_response_body: SettlementFailedResponseBody | None = None
     extensions: dict[str, Any] | None = None
     hook_timeout_seconds: float | None = None
+
+
+ProtectedRequestHook = Callable[
+    [HTTPRequestContext, RouteConfig],
+    ProtectedRequestHookResult | None | Awaitable[ProtectedRequestHookResult | None],
+]
 
 
 RoutesConfig = dict[str, RouteConfig] | RouteConfig
@@ -210,7 +255,12 @@ class RouteValidationError:
     route_pattern: str
     scheme: str
     network: str
-    reason: Literal["missing_scheme", "missing_facilitator"]
+    reason: Literal[
+        "missing_scheme",
+        "missing_facilitator",
+        "unsupported_asset_transfer_method",
+        "unsupported_payment_flow",
+    ]
     message: str
 
 

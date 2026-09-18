@@ -1,3 +1,49 @@
+/** V1 legacy network name → EVM chain ID. */
+export const EVM_NETWORK_CHAIN_ID_MAP = {
+  ethereum: 1,
+  sepolia: 11155111,
+  abstract: 2741,
+  "abstract-testnet": 11124,
+  "base-sepolia": 84532,
+  base: 8453,
+  "avalanche-fuji": 43113,
+  avalanche: 43114,
+  iotex: 4689,
+  sei: 1329,
+  "sei-testnet": 1328,
+  polygon: 137,
+  "polygon-amoy": 80002,
+  peaq: 3338,
+  story: 1514,
+  educhain: 41923,
+  "skale-base-sepolia": 324705682,
+  megaeth: 4326,
+  monad: 143,
+  stable: 988,
+  "stable-testnet": 2201,
+  celo: 42220,
+  flare: 14,
+} as const;
+
+export type EvmNetworkV1 = keyof typeof EVM_NETWORK_CHAIN_ID_MAP;
+
+export const NETWORKS: string[] = Object.keys(EVM_NETWORK_CHAIN_ID_MAP);
+
+/**
+ * Extract chain ID from a v1 legacy network name.
+ *
+ * @param network - The v1 network name (e.g., "base-sepolia", "polygon")
+ * @returns The numeric chain ID
+ * @throws Error if the network name is not a known v1 network
+ */
+export function getEvmChainIdV1(network: string): number {
+  const chainId = EVM_NETWORK_CHAIN_ID_MAP[network as EvmNetworkV1];
+  if (!chainId) {
+    throw new Error(`Unsupported v1 network: ${network}`);
+  }
+  return chainId;
+}
+
 // EIP-3009 TransferWithAuthorization types for EIP-712 signing
 export const authorizationTypes = {
   TransferWithAuthorization: [
@@ -214,7 +260,7 @@ export const x402ExactPermit2ProxyAddress = "0x402085c248EeA27D92E8b30b2C58ed07f
  * - Vanity-mined salt for prefix 0x4020 and suffix 0002
  * - Contract bytecode + constructor args (PERMIT2_ADDRESS)
  */
-export const x402UptoPermit2ProxyAddress = "0x402039b3d6E6BEC5A02c2C9fd937ac17A6940002" as const;
+export const x402UptoPermit2ProxyAddress = "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002" as const;
 
 /**
  * ABI components for the exact Permit2 witness tuple: Witness(address to, uint256 validAfter).

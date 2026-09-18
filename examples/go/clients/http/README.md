@@ -25,6 +25,9 @@ Required environment variables:
 - `SVM_PRIVATE_KEY` - Solana private key for SVM payments (optional)
 - `SERVER_URL` - Server endpoint (defaults to `http://localhost:4021/weather`)
 
+Optional environment variables:
+- `EVM_RPC_URL` - JSON-RPC endpoint for on-chain reads. Enables gas sponsoring extensions (EIP-2612 and ERC-20 approval). Example: `https://sepolia.base.org`
+
 **⚠️ Security Warning:** Never use mainnet keys in `.env` files! Use testnet keys only.
 
 3. Run the client:
@@ -54,18 +57,25 @@ go run . mechanism-helper-registration
 
 ```go
 import (
-    x402 "github.com/coinbase/x402/go"
-    x402http "github.com/coinbase/x402/go/http"
-    evm "github.com/coinbase/x402/go/mechanisms/evm/exact/client"
-    evmsigners "github.com/coinbase/x402/go/signers/evm"
+    x402 "github.com/x402-foundation/x402/go/v2"
+    x402http "github.com/x402-foundation/x402/go/v2/http"
+    evm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/client"
+    evmsigners "github.com/x402-foundation/x402/go/v2/signers/evm"
 )
 
 // Create signer
 signer, err := evmsigners.NewClientSignerFromPrivateKey(os.Getenv("EVM_PRIVATE_KEY"))
 
-// Configure client with builder pattern
+// Configure client with builder pattern.
+// Newx402Client() enables default spend controls: recognized pegged assets only, capped at $1 USD.
+// Registers exact, upto, and auth-capture EVM schemes (plus SVM when configured).
 client := x402.Newx402Client().
-    Register("eip155:*", evm.NewExactEvmScheme(signer))
+    Register("eip155:*", evm.NewExactEvmScheme(signer)).
+    Register("eip155:*", authcaptureclient.NewAuthCaptureEvmScheme(signer))
+
+// Optional: raise the cap or opt into non-default tokens
+// client.SetSpendControls(x402.SpendControls{MaxAmountPerPayment: "$5"})
+// client.DisableSpendControls() // disable all spend controls (any asset, no caps)
 
 // Wrap HTTP client with payment handling
 httpClient := x402http.WrapHTTPClientWithPayment(

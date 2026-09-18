@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
+  findFacilitatorBySchemeAndNetwork,
   findByNetworkAndScheme,
   findSchemesByNetwork,
   deepEqual,
   safeBase64Encode,
   safeBase64Decode,
+  numberToDecimalString,
+  convertToTokenAmount,
+  parseMoney,
+  parseMoneyString,
 } from "../../../src/utils";
 import { Network } from "../../../src/types";
 
@@ -92,6 +97,30 @@ describe("Utils", () => {
 
       expect(result?.get("exact")).toBe("exactNetworkImpl");
     });
+
+    it("should escape regex metacharacters in network patterns", () => {
+      const map = new Map<string, Map<string, string>>();
+      const schemes = new Map<string, string>();
+      schemes.set("exact", "evmImpl");
+      map.set("eip155:8453.*", schemes);
+
+      const matching = findSchemesByNetwork(map, "eip155:8453.mainnet" as Network);
+      const nonMatching = findSchemesByNetwork(map, "eip155:8453xmainnet" as Network);
+
+      expect(matching?.get("exact")).toBe("evmImpl");
+      expect(nonMatching).toBeUndefined();
+    });
+
+    it("should handle multiple wildcard occurrences in network patterns", () => {
+      const map = new Map<string, Map<string, string>>();
+      const schemes = new Map<string, string>();
+      schemes.set("exact", "multiWildcardImpl");
+      map.set("eip155:*:*", schemes);
+
+      const result = findSchemesByNetwork(map, "eip155:8453:usdc" as Network);
+
+      expect(result?.get("exact")).toBe("multiWildcardImpl");
+    });
   });
 
   describe("findByNetworkAndScheme", () => {
@@ -135,6 +164,35 @@ describe("Utils", () => {
       const result = findByNetworkAndScheme(map, "exact", "eip155:8453" as Network);
 
       expect(result).toBe("evmImpl");
+    });
+  });
+
+  describe("findFacilitatorBySchemeAndNetwork", () => {
+    it("should escape regex metacharacters in facilitator patterns", () => {
+      const schemeMap = new Map([
+        [
+          "exact",
+          {
+            facilitator: "facilitator",
+            networks: new Set<Network>(),
+            pattern: "eip155:8453.*" as Network,
+          },
+        ],
+      ]);
+
+      const matching = findFacilitatorBySchemeAndNetwork(
+        schemeMap,
+        "exact",
+        "eip155:8453.base" as Network,
+      );
+      const nonMatching = findFacilitatorBySchemeAndNetwork(
+        schemeMap,
+        "exact",
+        "eip155:8453xbase" as Network,
+      );
+
+      expect(matching).toBe("facilitator");
+      expect(nonMatching).toBeUndefined();
     });
   });
 
@@ -291,6 +349,141 @@ describe("Utils", () => {
     });
   });
 
+  describe("numberToDecimalString", () => {
+    it("should pass through plain integers", () => {
+      expect(numberToDecimalString(0)).toBe("0");
+      expect(numberToDecimalString(1)).toBe("1");
+      expect(numberToDecimalString(42)).toBe("42");
+      expect(numberToDecimalString(-5)).toBe("-5");
+    });
+
+    it("should pass through plain decimals", () => {
+      expect(numberToDecimalString(1.5)).toBe("1.5");
+      expect(numberToDecimalString(4.02)).toBe("4.02");
+      expect(numberToDecimalString(0.123)).toBe("0.123");
+      expect(numberToDecimalString(-3.14)).toBe("-3.14");
+    });
+
+    it("should expand small negative exponents", () => {
+      expect(numberToDecimalString(1e-7)).toBe("0.0000001");
+      expect(numberToDecimalString(1e-8)).toBe("0.00000001");
+      expect(numberToDecimalString(1.5e-6)).toBe("0.0000015");
+      expect(numberToDecimalString(1e-18)).toBe("0.000000000000000001");
+    });
+
+    it("should expand negative numbers with negative exponents", () => {
+      expect(numberToDecimalString(-1e-7)).toBe("-0.0000001");
+      expect(numberToDecimalString(-2.5e-10)).toBe("-0.00000000025");
+    });
+
+    it("should expand large positive exponents", () => {
+      expect(numberToDecimalString(1e20)).toBe("100000000000000000000");
+      expect(numberToDecimalString(1.5e10)).toBe("15000000000");
+    });
+  });
+
+  describe("convertToTokenAmount", () => {
+    describe("basic conversions", () => {
+      it("should convert decimal amounts to token units", () => {
+        expect(convertToTokenAmount("4.02", 6)).toBe("4020000");
+        expect(convertToTokenAmount("0.10", 6)).toBe("100000");
+        expect(convertToTokenAmount("1.00", 6)).toBe("1000000");
+        expect(convertToTokenAmount("0.01", 6)).toBe("10000");
+        expect(convertToTokenAmount("123.456789", 6)).toBe("123456789");
+      });
+
+      it("should handle whole numbers", () => {
+        expect(convertToTokenAmount("1", 6)).toBe("1000000");
+        expect(convertToTokenAmount("100", 6)).toBe("100000000");
+        expect(convertToTokenAmount("0", 6)).toBe("0");
+      });
+
+      it("should handle different decimal precisions", () => {
+        expect(convertToTokenAmount("1", 0)).toBe("1");
+        expect(convertToTokenAmount("1", 2)).toBe("100");
+        expect(convertToTokenAmount("1", 7)).toBe("10000000");
+        expect(convertToTokenAmount("1", 9)).toBe("1000000000");
+        expect(convertToTokenAmount("1.0", 18)).toBe("1000000000000000000");
+      });
+
+      it("should truncate excess decimal places", () => {
+        expect(convertToTokenAmount("1.12345678", 7)).toBe("11234567");
+        expect(convertToTokenAmount("1.5", 0)).toBe("1");
+        expect(convertToTokenAmount("2.9", 0)).toBe("2");
+      });
+
+      it("should handle trailing zeros", () => {
+        expect(convertToTokenAmount("1.0", 6)).toBe("1000000");
+        expect(convertToTokenAmount("0.1000000", 7)).toBe("1000000");
+      });
+
+      it("should handle negative numbers", () => {
+        expect(convertToTokenAmount("-1.5", 6)).toBe("-1500000");
+      });
+
+      it("should handle very large numbers", () => {
+        expect(convertToTokenAmount("999999999.9999999", 7)).toBe("9999999999999999");
+      });
+    });
+
+    describe("small amounts with sufficient precision", () => {
+      it("should convert tiny amounts when token has enough decimals", () => {
+        // 0.0000001 with 9 decimals = 100 atomic units
+        expect(convertToTokenAmount("0.0000001", 9)).toBe("100");
+        // 0.000000001 with 9 decimals = 1 atomic unit
+        expect(convertToTokenAmount("0.000000001", 9)).toBe("1");
+        // 0.0000015 with 9 decimals = 1500 atomic units
+        expect(convertToTokenAmount("0.0000015", 9)).toBe("1500");
+      });
+
+      it("should handle the smallest representable amount", () => {
+        expect(convertToTokenAmount("0.0000001", 7)).toBe("1");
+        expect(convertToTokenAmount("0.000001", 6)).toBe("1");
+        expect(convertToTokenAmount("0.000000000000000001", 18)).toBe("1");
+      });
+    });
+
+    describe("amounts smaller than one atomic unit", () => {
+      it("truncates a non-zero amount to 0 when it is smaller than one atomic unit", () => {
+        expect(convertToTokenAmount("0.0000001", 6)).toBe("0");
+        expect(convertToTokenAmount("0.00000001", 7)).toBe("0");
+        expect(convertToTokenAmount("0.0000000001", 6)).toBe("0");
+      });
+
+      it("keeps explicit zero as 0", () => {
+        expect(convertToTokenAmount("0", 6)).toBe("0");
+        expect(convertToTokenAmount("0.0", 6)).toBe("0");
+        expect(convertToTokenAmount("0.000000", 6)).toBe("0");
+      });
+
+      it("pads and truncates toward zero without rounding", () => {
+        expect(convertToTokenAmount("1.0000005", 6)).toBe("1000000");
+        expect(convertToTokenAmount("0.0000005", 6)).toBe("0");
+        expect(convertToTokenAmount("0.0000009", 6)).toBe("0");
+        expect(convertToTokenAmount("8975.978289462729", 18)).toBe("8975978289462729000000");
+        expect(convertToTokenAmount("8975.978289462729", 6)).toBe("8975978289");
+      });
+    });
+
+    describe("scientific notation rejection", () => {
+      it("should throw for scientific notation input", () => {
+        expect(() => convertToTokenAmount("1e-7", 9)).toThrow("scientific notation");
+        expect(() => convertToTokenAmount("1e-6", 6)).toThrow("scientific notation");
+        expect(() => convertToTokenAmount("1.5e-6", 9)).toThrow("scientific notation");
+        expect(() => convertToTokenAmount("1E10", 6)).toThrow("scientific notation");
+      });
+    });
+
+    describe("invalid input", () => {
+      it("should throw for non-numeric strings", () => {
+        expect(() => convertToTokenAmount("invalid", 6)).toThrow("Invalid amount");
+        expect(() => convertToTokenAmount("abc", 6)).toThrow("Invalid amount");
+        expect(() => convertToTokenAmount("", 6)).toThrow("Invalid amount");
+        expect(() => convertToTokenAmount("NaN", 6)).toThrow("Invalid amount");
+      });
+    });
+  });
+
   describe("Base64 encoding", () => {
     const unicodeOriginal =
       "USD₮0 🤖 中文 ありがとう नमस्ते Привет مرحبا بالعالم שלום Γειά σου สวัสดี";
@@ -350,6 +543,44 @@ describe("Utils", () => {
         expect(safeBase64Decode("YWI=")).toBe("ab");
         expect(safeBase64Decode("YWJj")).toBe("abc");
       });
+    });
+  });
+
+  describe("parseMoney", () => {
+    it("parses dollar and plain amounts without a symbol", () => {
+      expect(parseMoney("$1.50")).toEqual({ amount: "1.50" });
+      expect(parseMoney("1.50")).toEqual({ amount: "1.50" });
+      expect(parseMoney(1.5)).toEqual({ amount: "1.5" });
+    });
+
+    it("parses a ticker suffix and upper-cases it", () => {
+      expect(parseMoney("1.50 USDT")).toEqual({ amount: "1.50", symbol: "USDT" });
+      expect(parseMoney("1.50 usdt")).toEqual({ amount: "1.50", symbol: "USDT" });
+    });
+
+    it("treats USD as the network default (no symbol)", () => {
+      expect(parseMoney("1.50 USD")).toEqual({ amount: "1.50" });
+    });
+
+    it("rejects a ticker glued to the amount without a space", () => {
+      expect(() => parseMoney("1.50USDT")).toThrow(/Invalid money format/);
+    });
+
+    it("rejects negative amounts", () => {
+      expect(() => parseMoney(-5)).toThrow("Invalid money format: -5");
+      expect(() => parseMoney("-1.50")).toThrow(/Invalid money format/);
+      expect(() => parseMoney("-$1.50")).toThrow(/Invalid money format/);
+      expect(() => parseMoneyString("-1.50")).toThrow(/Invalid money format/);
+    });
+
+    it("keeps parseMoneyString rejecting suffixes", () => {
+      expect(() => parseMoneyString("1.50 USDT")).toThrow(/Invalid money format/);
+    });
+
+    it("returns the extracted decimal substring without Number conversion", () => {
+      expect(parseMoneyString("$1.50")).toBe("1.50");
+      expect(parseMoneyString("1.00")).toBe("1.00");
+      expect(parseMoneyString("0.00")).toBe("0.00");
     });
   });
 });

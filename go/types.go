@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/coinbase/x402/go/types"
+	"github.com/x402-foundation/x402/go/v2/types"
 )
 
 // Network represents a blockchain network identifier in CAIP-2 format
@@ -49,6 +49,41 @@ func (n Network) Match(pattern Network) bool {
 // Price represents a price that can be specified in various formats
 type Price interface{}
 
+// DefaultMaxAmountPerPayment is the default USD cap for recognized default assets.
+const DefaultMaxAmountPerPayment = "$1"
+
+// DefaultAsset is a USD-pegged asset used for money strings and client spend caps.
+type DefaultAsset struct {
+	Asset    string
+	Decimals int
+	Symbol   string
+}
+
+// SpendControlAsset is an opt-in asset for SpendControls.AllowedAssets.
+// Default assets are always allowed; list non-default tokens here (and optional atomic caps).
+type SpendControlAsset struct {
+	Network Network
+	// Asset is an onchain asset id, or a default-asset symbol (e.g. "PYUSD").
+	Asset string
+	// MaxAmountPerPayment is an optional atomic per-payment cap. Empty means unset.
+	MaxAmountPerPayment string
+}
+
+// SpendControls are client spend controls enforced before policies.
+// By default only assets FindDefaultAsset recognizes are allowed, capped at
+// DefaultMaxAmountPerPayment. Disable with DisableSpendControls.
+type SpendControls struct {
+	// MaxAmountPerPayment is the per-payment USD cap on assets FindDefaultAsset recognizes.
+	// Empty means DefaultMaxAmountPerPayment. Disable with DisableMaxAmountPerPayment.
+	MaxAmountPerPayment string
+	// DisableMaxAmountPerPayment disables the USD cap (TS maxAmountPerPayment: false).
+	DisableMaxAmountPerPayment bool
+	// AllowAnyAsset allows any asset (USD cap still applies to defaults).
+	AllowAnyAsset bool
+	// AllowedAssets lists opt-in non-default assets (ignored when AllowAnyAsset is set).
+	AllowedAssets []SpendControlAsset
+}
+
 // AssetAmount represents an amount of a specific asset
 type AssetAmount struct {
 	Asset  string                 `json:"asset"`
@@ -81,27 +116,45 @@ type (
 // VerifyResponse contains the verification result
 // If verification fails, an error (typically *VerifyError) is returned and this will be nil
 type VerifyResponse struct {
-	IsValid        bool   `json:"isValid"`
-	InvalidReason  string `json:"invalidReason,omitempty"`
-	InvalidMessage string `json:"invalidMessage,omitempty"`
-	Payer          string `json:"payer,omitempty"`
+	IsValid        bool                   `json:"isValid"`
+	InvalidReason  string                 `json:"invalidReason,omitempty"`
+	InvalidMessage string                 `json:"invalidMessage,omitempty"`
+	Payer          string                 `json:"payer,omitempty"`
+	Extensions     map[string]interface{} `json:"extensions,omitempty"`
+	// ExtensionResponses is a facilitator sidechannel for resource-server hooks.
+	ExtensionResponses map[string]interface{} `json:"-"`
+	Extra              map[string]interface{} `json:"extra,omitempty"`
+
+	// SkipHandler is an in-process directive set by an AfterVerifyHook that wants
+	// the HTTP layer to bypass the resource handler and settle inline. It is never
+	// serialized to the facilitator wire.
+	SkipHandler *SkipHandlerDirective `json:"-"`
 }
 
 // SettleResponse contains the settlement result
 // If settlement fails, an error (typically *SettleError) is returned and this will be nil
 type SettleResponse struct {
-	Success      bool    `json:"success"`
-	ErrorReason  string  `json:"errorReason,omitempty"`
-	ErrorMessage string  `json:"errorMessage,omitempty"`
-	Payer        string  `json:"payer,omitempty"`
-	Transaction  string  `json:"transaction"`
-	Network      Network `json:"network"`
+	Success      bool                   `json:"success"`
+	ErrorReason  string                 `json:"errorReason,omitempty"`
+	ErrorMessage string                 `json:"errorMessage,omitempty"`
+	Payer        string                 `json:"payer,omitempty"`
+	Transaction  string                 `json:"transaction"`
+	Network      Network                `json:"network"`
+	Amount       string                 `json:"amount,omitempty"`
+	Extensions   map[string]interface{} `json:"extensions,omitempty"`
+	// ExtensionResponses is a facilitator sidechannel for resource-server hooks.
+	ExtensionResponses map[string]interface{} `json:"-"`
+	Extra              map[string]interface{} `json:"extra,omitempty"`
 }
 
 // SettlementOverrides allows overriding settlement parameters.
 // Used to support partial settlement (e.g., upto scheme billing by actual usage).
 type SettlementOverrides struct {
-	// Amount is the actual amount to settle in atomic token units. Must be <= authorized max.
+	// Amount to settle. Supports three formats:
+	//   - Raw atomic units: "1000" settles exactly 1000 atomic units.
+	//   - Percent: "50%" settles 50% of PaymentRequirements.Amount (up to 2 decimal places, floored).
+	//   - Dollar price: "$0.05" converts to atomic units using Extra["decimals"] (default 6).
+	// The resolved amount must be <= the authorized maximum in PaymentRequirements.
 	Amount string `json:"amount,omitempty"`
 }
 

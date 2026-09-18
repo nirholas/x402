@@ -13,7 +13,7 @@ export const MEMO_PROGRAM_ADDRESS = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr
  * - Phantom adds 1 Lighthouse instruction (4th instruction)
  * - Solflare adds 2 Lighthouse instructions (4th and 5th instructions)
  * We allow these as optional instructions to support these wallets.
- * See: https://github.com/coinbase/x402/issues/828
+ * See: https://github.com/x402-foundation/x402/issues/828
  */
 export const LIGHTHOUSE_PROGRAM_ADDRESS = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 
@@ -28,19 +28,13 @@ export const TESTNET_WS_URL = "wss://api.testnet.solana.com";
 export const MAINNET_WS_URL = "wss://api.mainnet-beta.solana.com";
 
 /**
- * USDC token mint addresses (default stablecoin)
- */
-export const USDC_MAINNET_ADDRESS = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-export const USDC_DEVNET_ADDRESS = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
-export const USDC_TESTNET_ADDRESS = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"; // Same as devnet
-
-/**
  * Compute budget configuration
  * All prices are in microlamports (1 lamport = 1,000,000 microlamports)
  */
 export const DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS = 1;
 export const MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS = 5_000_000; // 5 lamports
 export const DEFAULT_COMPUTE_UNIT_LIMIT = 20_000;
+export const MAX_MEMO_BYTES = 256;
 
 /**
  * How long a transaction is held in the duplicate settlement cache (ms).
@@ -69,3 +63,25 @@ export const V1_TO_V2_NETWORK_MAP: Record<string, string> = {
   "solana-devnet": SOLANA_DEVNET_CAIP2,
   "solana-testnet": SOLANA_TESTNET_CAIP2,
 };
+
+/**
+ * Normalize v1 or CAIP-2 SVM network id to CAIP-2.
+ *
+ * @param network - V1 name or CAIP-2 id
+ * @returns CAIP-2 network identifier
+ */
+export function normalizeNetwork(network: string): string {
+  if (network.includes(":")) {
+    const supported = [SOLANA_MAINNET_CAIP2, SOLANA_DEVNET_CAIP2, SOLANA_TESTNET_CAIP2];
+    if (!supported.includes(network)) {
+      throw new Error(`Unsupported SVM network: ${network}`);
+    }
+    return network;
+  }
+
+  const caip2Network = V1_TO_V2_NETWORK_MAP[network];
+  if (!caip2Network) {
+    throw new Error(`Unsupported SVM network: ${network}`);
+  }
+  return caip2Network;
+}

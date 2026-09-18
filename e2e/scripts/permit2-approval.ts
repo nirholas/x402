@@ -70,6 +70,20 @@ const erc20Abi = parseAbi([
   'function balanceOf(address account) view returns (uint256)',
 ]);
 
+async function waitForApprovalReceipt(
+  publicClient: {
+    waitForTransactionReceipt: (args: { hash: `0x${string}` }) => Promise<{ status: string }>;
+  },
+  hash: `0x${string}`,
+  actionLabel: string,
+) {
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.status !== 'success') {
+    throw new Error(`${actionLabel} transaction failed: ${hash}`);
+  }
+  console.log(`   ✅ ${actionLabel} confirmed (tx: ${hash})`);
+}
+
 async function main() {
   const action = process.argv[2];
   const tokenAddressArg = process.argv[3];
@@ -175,15 +189,8 @@ Environment variables required:
         nonce: nonce++,
       });
 
-      console.log(`   📝 Transaction: ${hash}`);
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-      if (receipt.status === 'success') {
-        console.log(`   ✅ Revoked (block ${receipt.blockNumber}, gas ${receipt.gasUsed})`);
-      } else {
-        console.error(`   ❌ Revoke transaction failed`);
-        process.exit(1);
-      }
+      console.log(`   ✅ Revoke submitted (tx: ${hash})`);
+      await waitForApprovalReceipt(publicClient, hash, 'Revoke');
     }
     return;
   }
@@ -205,15 +212,8 @@ Environment variables required:
       nonce: nonce++,
     });
 
-    console.log(`   📝 Transaction: ${hash}`);
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-    if (receipt.status === 'success') {
-      console.log(`   ✅ Approved (block ${receipt.blockNumber}, gas ${receipt.gasUsed})`);
-    } else {
-      console.error(`   ❌ Transaction failed`);
-      process.exit(1);
-    }
+    console.log(`   ✅ Approve submitted (tx: ${hash})`);
+    await waitForApprovalReceipt(publicClient, hash, 'Approve');
   }
 }
 

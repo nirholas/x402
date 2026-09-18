@@ -6,10 +6,12 @@ package integration_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,13 +24,16 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 
-	x402 "github.com/coinbase/x402/go"
-	"github.com/coinbase/x402/go/mechanisms/evm"
-	evmclient "github.com/coinbase/x402/go/mechanisms/evm/exact/client"
-	evmfacilitator "github.com/coinbase/x402/go/mechanisms/evm/exact/facilitator"
-	evmserver "github.com/coinbase/x402/go/mechanisms/evm/exact/server"
-	evmsigners "github.com/coinbase/x402/go/signers/evm"
-	"github.com/coinbase/x402/go/types"
+	x402 "github.com/x402-foundation/x402/go/v2"
+	"github.com/x402-foundation/x402/go/v2/mechanisms/evm"
+	exactevmclient "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/client"
+	exactevmfacilitator "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/facilitator"
+	exactevmserver "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/server"
+	uptoevmclient "github.com/x402-foundation/x402/go/v2/mechanisms/evm/upto/client"
+	uptoevmfacilitator "github.com/x402-foundation/x402/go/v2/mechanisms/evm/upto/facilitator"
+	uptoevmserver "github.com/x402-foundation/x402/go/v2/mechanisms/evm/upto/server"
+	evmsigners "github.com/x402-foundation/x402/go/v2/signers/evm"
+	"github.com/x402-foundation/x402/go/v2/types"
 )
 
 // newRealClientEvmSigner creates a client signer using the helper
@@ -147,7 +152,37 @@ func (s *realFacilitatorEvmSigner) ReadContract(
 	functionName string,
 	args ...interface{},
 ) (interface{}, error) {
-	return callContractAndDecode(ctx, s.ethClient, contractAddress, abiBytes, functionName, args...)
+	// Set From to the facilitator's own address, matching TypeScript's viem WalletClient
+	// which always includes from=account.address in eth_call. This is required for
+	// contracts that check msg.sender (e.g. the upto proxy settle() function).
+	contractABI, err := abi.JSON(strings.NewReader(string(abiBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ABI: %w", err)
+	}
+	callData, err := contractABI.Pack(functionName, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack %s: %w", functionName, err)
+	}
+	addr := common.HexToAddress(contractAddress)
+	result, err := s.ethClient.CallContract(ctx, ethereum.CallMsg{
+		From: s.address,
+		To:   &addr,
+		Data: callData,
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("eth_call failed: %w", err)
+	}
+	outputs, err := contractABI.Unpack(functionName, result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack %s result: %w", functionName, err)
+	}
+	if len(outputs) == 0 {
+		return nil, nil
+	}
+	if len(outputs) == 1 {
+		return outputs[0], nil
+	}
+	return outputs, nil
 }
 
 func (s *realFacilitatorEvmSigner) WriteContract(
@@ -155,6 +190,7 @@ func (s *realFacilitatorEvmSigner) WriteContract(
 	contractAddress string,
 	abiBytes []byte,
 	functionName string,
+	dataSuffix []byte,
 	args ...interface{},
 ) (string, error) {
 	contractABI, err := abi.JSON(strings.NewReader(string(abiBytes)))
@@ -166,6 +202,7 @@ func (s *realFacilitatorEvmSigner) WriteContract(
 	if err != nil {
 		return "", fmt.Errorf("failed to pack method call: %w", err)
 	}
+	data = evm.AppendDataSuffix(data, dataSuffix)
 
 	to := common.HexToAddress(contractAddress)
 	return s.sendTxWithRetry(ctx, to, data, 300000)
@@ -242,6 +279,7 @@ func (s *realFacilitatorEvmSigner) WaitForTransactionReceipt(ctx context.Context
 				Status:      status,
 				BlockNumber: receipt.BlockNumber.Uint64(),
 				TxHash:      receipt.TxHash.Hex(),
+				Logs:        receipt.Logs,
 			}, nil
 		}
 
@@ -292,7 +330,15 @@ func (s *realFacilitatorEvmSigner) VerifyTypedData(
 		typedData.Types[typeName] = typedFields
 	}
 
-	// Hash the data
+	if _, exists := typedData.Types["EIP712Domain"]; !exists {
+		typedData.Types["EIP712Domain"] = []apitypes.Type{
+			{Name: "name", Type: "string"},
+			{Name: "version", Type: "string"},
+			{Name: "chainId", Type: "uint256"},
+			{Name: "verifyingContract", Type: "address"},
+		}
+	}
+
 	dataHash, err := typedData.HashStruct(typedData.PrimaryType, typedData.Message)
 	if err != nil {
 		return false, err
@@ -308,12 +354,10 @@ func (s *realFacilitatorEvmSigner) VerifyTypedData(
 	rawData = append(rawData, dataHash...)
 	digest := crypto.Keccak256(rawData)
 
-	// Recover the public key from the signature
 	if len(signature) != 65 {
 		return false, fmt.Errorf("invalid signature length: %d", len(signature))
 	}
 
-	// Adjust v value back for recovery
 	v := signature[64]
 	if v >= 27 {
 		v -= 27
@@ -383,7 +427,7 @@ func TestEVMIntegrationV2(t *testing.T) {
 
 		// Setup client with EVM v2 scheme
 		client := x402.Newx402Client()
-		evmClient := evmclient.NewExactEvmScheme(clientSigner, nil)
+		evmClient := exactevmclient.NewExactEvmScheme(clientSigner, nil)
 		// Register for Base Sepolia
 		client.Register("eip155:84532", evmClient)
 
@@ -395,11 +439,8 @@ func TestEVMIntegrationV2(t *testing.T) {
 
 		// Setup facilitator with EVM v2 scheme
 		facilitator := x402.Newx402Facilitator()
-		// Enable smart wallet deployment via EIP-6492
-		evmConfig := &evmfacilitator.ExactEvmSchemeConfig{
-			DeployERC4337WithEIP6492: true,
-		}
-		evmFacilitator := evmfacilitator.NewExactEvmScheme(facilitatorSigner, evmConfig)
+		evmConfig := &exactevmfacilitator.ExactEvmSchemeConfig{}
+		evmFacilitator := exactevmfacilitator.NewExactEvmScheme(facilitatorSigner, evmConfig)
 		// Register for Base Sepolia
 		facilitator.Register([]x402.Network{"eip155:84532"}, evmFacilitator)
 
@@ -407,7 +448,7 @@ func TestEVMIntegrationV2(t *testing.T) {
 		facilitatorClient := &localEvmFacilitatorClient{facilitator: facilitator}
 
 		// Setup resource server with EVM v2
-		evmServer := evmserver.NewExactEvmScheme()
+		evmServer := exactevmserver.NewExactEvmScheme()
 		server := x402.Newx402ResourceServer(
 			x402.WithFacilitatorClient(facilitatorClient),
 		)
@@ -567,36 +608,39 @@ func TestEVMIntegrationV2Permit2(t *testing.T) {
 
 		// Setup client with EVM v2 scheme
 		client := x402.Newx402Client()
-		evmClient := evmclient.NewExactEvmScheme(clientSigner, nil)
+		evmClient := exactevmclient.NewExactEvmScheme(clientSigner, nil)
 		client.Register("eip155:84532", evmClient)
 
 		// Create facilitator signer with Permit2 support
-		facilitatorSigner, err := newPermit2FacilitatorEvmSigner(facilitatorPrivateKey, "https://sepolia.base.org")
+		facilitatorSigner, err := newPermit2FacilitatorEvmSigner(ctx, facilitatorPrivateKey, "https://sepolia.base.org")
 		if err != nil {
 			t.Fatalf("Failed to create facilitator signer: %v", err)
 		}
 
 		// Setup facilitator with EVM v2 scheme
 		facilitator := x402.Newx402Facilitator()
-		evmConfig := &evmfacilitator.ExactEvmSchemeConfig{
-			DeployERC4337WithEIP6492: true,
-		}
-		evmFacilitator := evmfacilitator.NewExactEvmScheme(facilitatorSigner, evmConfig)
+		evmConfig := &exactevmfacilitator.ExactEvmSchemeConfig{}
+		evmFacilitator := exactevmfacilitator.NewExactEvmScheme(facilitatorSigner, evmConfig)
 		facilitator.Register([]x402.Network{"eip155:84532"}, evmFacilitator)
 
 		// Create facilitator client wrapper
 		facilitatorClient := &localEvmFacilitatorClient{facilitator: facilitator}
 
 		// Setup resource server with EVM v2
-		evmServer := evmserver.NewExactEvmScheme()
-		evmServer.RegisterMoneyParser(func(amount float64, network x402.Network) (*x402.AssetAmount, error) {
+		evmServer := exactevmserver.NewExactEvmScheme()
+		evmServer.RegisterMoneyParser(func(amount string, network x402.Network) (*x402.AssetAmount, error) {
 			if string(network) != "eip155:84532" {
 				return nil, nil
 			}
 
+			tokenAmount, err := x402.ConvertToTokenAmount(amount, 6)
+			if err != nil {
+				return nil, err
+			}
+
 			return &x402.AssetAmount{
 				Asset:  "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // USDC on Base Sepolia
-				Amount: fmt.Sprintf("%.0f", amount*1e6),
+				Amount: tokenAmount,
 				Extra: map[string]interface{}{
 					"assetTransferMethod": "permit2",
 					"name":                "USDC",
@@ -731,7 +775,7 @@ func TestEVMIntegrationV2Permit2(t *testing.T) {
 }
 
 // newPermit2FacilitatorEvmSigner creates a facilitator signer with Permit2 support
-func newPermit2FacilitatorEvmSigner(privateKeyHex string, rpcURL string) (*permit2FacilitatorEvmSigner, error) {
+func newPermit2FacilitatorEvmSigner(ctx context.Context, privateKeyHex string, rpcURL string) (*permit2FacilitatorEvmSigner, error) {
 	privateKeyHex = strings.TrimPrefix(privateKeyHex, "0x")
 
 	privateKey, err := crypto.HexToECDSA(privateKeyHex)
@@ -746,7 +790,6 @@ func newPermit2FacilitatorEvmSigner(privateKeyHex string, rpcURL string) (*permi
 		return nil, fmt.Errorf("failed to connect to RPC: %w", err)
 	}
 
-	ctx := context.Background()
 	chainID, err := client.ChainID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chain ID: %w", err)
@@ -787,6 +830,44 @@ func (s *permit2FacilitatorEvmSigner) GetCode(ctx context.Context, address strin
 	return s.ethClient.CodeAt(ctx, addr, nil)
 }
 
+func (s *permit2FacilitatorEvmSigner) readContractWithFrom(
+	ctx context.Context,
+	from common.Address,
+	contractAddress string,
+	abiBytes []byte,
+	functionName string,
+	args ...interface{},
+) (interface{}, error) {
+	contractABI, err := abi.JSON(strings.NewReader(string(abiBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ABI: %w", err)
+	}
+	callData, err := contractABI.Pack(functionName, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack %s: %w", functionName, err)
+	}
+	addr := common.HexToAddress(contractAddress)
+	result, err := s.ethClient.CallContract(ctx, ethereum.CallMsg{
+		From: from,
+		To:   &addr,
+		Data: callData,
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("eth_call failed: %w", err)
+	}
+	outputs, err := contractABI.Unpack(functionName, result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack %s result: %w", functionName, err)
+	}
+	if len(outputs) == 0 {
+		return nil, nil
+	}
+	if len(outputs) == 1 {
+		return outputs[0], nil
+	}
+	return outputs, nil
+}
+
 func (s *permit2FacilitatorEvmSigner) ReadContract(
 	ctx context.Context,
 	contractAddress string,
@@ -794,16 +875,17 @@ func (s *permit2FacilitatorEvmSigner) ReadContract(
 	functionName string,
 	args ...interface{},
 ) (interface{}, error) {
-	// For allowance, fall back to MaxUint256 on any error (Permit2 integration test convenience)
+	// Set From to the facilitator's own address, matching TypeScript's viem WalletClient
+	// which always includes from=account.address in eth_call.
 	if functionName == "allowance" {
-		result, err := callContractAndDecode(ctx, s.ethClient, contractAddress, abiBytes, functionName, args...)
+		result, err := s.readContractWithFrom(ctx, s.address, contractAddress, abiBytes, functionName, args...)
 		if err != nil {
 			return evm.MaxUint256(), nil //nolint:nilerr // fallback to assume approved
 		}
 		return result, nil
 	}
 
-	return callContractAndDecode(ctx, s.ethClient, contractAddress, abiBytes, functionName, args...)
+	return s.readContractWithFrom(ctx, s.address, contractAddress, abiBytes, functionName, args...)
 }
 
 func (s *permit2FacilitatorEvmSigner) WriteContract(
@@ -811,6 +893,7 @@ func (s *permit2FacilitatorEvmSigner) WriteContract(
 	contractAddress string,
 	abiBytes []byte,
 	functionName string,
+	dataSuffix []byte,
 	args ...interface{},
 ) (string, error) {
 	contractABI, err := abi.JSON(strings.NewReader(string(abiBytes)))
@@ -822,6 +905,7 @@ func (s *permit2FacilitatorEvmSigner) WriteContract(
 	if err != nil {
 		return "", fmt.Errorf("failed to pack method call: %w", err)
 	}
+	data = evm.AppendDataSuffix(data, dataSuffix)
 
 	to := common.HexToAddress(contractAddress)
 	return s.sendTxWithRetry(ctx, to, data, 300000)
@@ -897,6 +981,7 @@ func (s *permit2FacilitatorEvmSigner) WaitForTransactionReceipt(ctx context.Cont
 				Status:      status,
 				BlockNumber: receipt.BlockNumber.Uint64(),
 				TxHash:      receipt.TxHash.Hex(),
+				Logs:        receipt.Logs,
 			}, nil
 		}
 
@@ -947,7 +1032,15 @@ func (s *permit2FacilitatorEvmSigner) VerifyTypedData(
 		typedData.Types[typeName] = typedFields
 	}
 
-	// Hash the data
+	if _, exists := typedData.Types["EIP712Domain"]; !exists {
+		typedData.Types["EIP712Domain"] = []apitypes.Type{
+			{Name: "name", Type: "string"},
+			{Name: "version", Type: "string"},
+			{Name: "chainId", Type: "uint256"},
+			{Name: "verifyingContract", Type: "address"},
+		}
+	}
+
 	dataHash, err := typedData.HashStruct(typedData.PrimaryType, typedData.Message)
 	if err != nil {
 		return false, err
@@ -963,12 +1056,10 @@ func (s *permit2FacilitatorEvmSigner) VerifyTypedData(
 	rawData = append(rawData, dataHash...)
 	digest := crypto.Keccak256(rawData)
 
-	// Recover the public key from the signature
 	if len(signature) != 65 {
 		return false, fmt.Errorf("invalid signature length: %d", len(signature))
 	}
 
-	// Adjust v value back for recovery
 	v := signature[64]
 	if v >= 27 {
 		v -= 27
@@ -1449,7 +1540,7 @@ func TestEVMIntegrationV1(t *testing.T) {
 
 		// Setup resource server with EVM v1
 		// V1 doesn't have separate server, uses V2 server
-		evmServerV1 := evmserver.NewExactEvmScheme()
+		evmServerV1 := exactevmserver.NewExactEvmScheme()
 		server := x402.Newx402ResourceServer(
 			x402.WithFacilitatorClient(facilitatorClient),
 		)
@@ -1579,3 +1670,700 @@ func TestEVMIntegrationV1(t *testing.T) {
 	})
 }
 */
+
+func TestEVMIntegrationV2UptoPermit2(t *testing.T) {
+	clientPrivateKey := os.Getenv("EVM_CLIENT_PRIVATE_KEY")
+	facilitatorPrivateKey := os.Getenv("EVM_FACILITATOR_PRIVATE_KEY")
+	resourceServerAddress := os.Getenv("EVM_RESOURCE_SERVER_ADDRESS")
+
+	if clientPrivateKey == "" || facilitatorPrivateKey == "" || resourceServerAddress == "" {
+		t.Skip("Skipping EVM upto Permit2 integration test: EVM_CLIENT_PRIVATE_KEY, EVM_FACILITATOR_PRIVATE_KEY, and EVM_RESOURCE_SERVER_ADDRESS must be set")
+	}
+
+	ctx := context.Background()
+	rpcURL := "https://sepolia.base.org"
+
+	t.Run("Upto EVM V2 Permit2 - Full Flow", func(t *testing.T) {
+		waitForPendingTransactions(t, ctx, facilitatorPrivateKey, rpcURL)
+
+		revokePermit2Approval(t, ctx, clientPrivateKey,
+			"0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			rpcURL,
+		)
+
+		clientEthClient, err := ethclient.Dial(rpcURL)
+		if err != nil {
+			t.Fatalf("Failed to connect to Base Sepolia: %v", err)
+		}
+		defer clientEthClient.Close()
+		clientSigner, err := evmsigners.NewClientSignerFromPrivateKeyWithClient(clientPrivateKey, clientEthClient)
+		if err != nil {
+			t.Fatalf("Failed to create client signer: %v", err)
+		}
+
+		client := x402.Newx402Client()
+		uptoClient := uptoevmclient.NewUptoEvmScheme(clientSigner, nil)
+		client.Register("eip155:84532", uptoClient)
+
+		facilitatorSigner, err := newPermit2FacilitatorEvmSigner(ctx, facilitatorPrivateKey, rpcURL)
+		if err != nil {
+			t.Fatalf("Failed to create facilitator signer: %v", err)
+		}
+
+		facilitator := x402.Newx402Facilitator()
+		uptoFacilitator := uptoevmfacilitator.NewUptoEvmScheme(facilitatorSigner, nil)
+		facilitator.Register([]x402.Network{"eip155:84532"}, uptoFacilitator)
+
+		facilitatorClient := &localEvmFacilitatorClient{facilitator: facilitator}
+
+		uptoServer := uptoevmserver.NewUptoEvmScheme()
+		server := x402.Newx402ResourceServer(
+			x402.WithFacilitatorClient(facilitatorClient),
+		)
+		server.Register("eip155:84532", uptoServer)
+
+		err = server.Initialize(ctx)
+		if err != nil {
+			t.Fatalf("Failed to initialize server: %v", err)
+		}
+
+		accepts, err := server.BuildPaymentRequirementsFromConfig(ctx, x402.ResourceConfig{
+			Scheme:            evm.SchemeUpto,
+			Network:           "eip155:84532",
+			PayTo:             resourceServerAddress,
+			Price:             "$0.001",
+			MaxTimeoutSeconds: 300,
+		})
+		if err != nil {
+			t.Fatalf("Failed to build payment requirements: %v", err)
+		}
+		if accepts[0].Extra["assetTransferMethod"] != "permit2" {
+			t.Fatalf("Expected Permit2 payment requirements, got extra=%v", accepts[0].Extra)
+		}
+		if accepts[0].Extra["facilitatorAddress"] == nil {
+			t.Fatal("Expected facilitatorAddress in payment requirements extra")
+		}
+
+		resource := &types.ResourceInfo{
+			URL:         "https://api.example.com/upto-permit2",
+			Description: "Upto Permit2 API Access",
+			MimeType:    "application/json",
+		}
+
+		serverExtensions := map[string]interface{}{
+			"eip2612GasSponsoring": map[string]interface{}{
+				"info":   map[string]interface{}{"description": "EIP-2612 gas sponsoring", "version": "1"},
+				"schema": map[string]interface{}{},
+			},
+		}
+		paymentRequiredResponse := server.CreatePaymentRequiredResponse(accepts, resource, "", serverExtensions)
+
+		if paymentRequiredResponse.X402Version != 2 {
+			t.Errorf("Expected X402Version 2, got %d", paymentRequiredResponse.X402Version)
+		}
+
+		selected, err := client.SelectPaymentRequirements(accepts)
+		if err != nil {
+			t.Fatalf("Failed to select payment requirements: %v", err)
+		}
+
+		paymentPayload, err := client.CreatePaymentPayload(ctx, selected, resource, paymentRequiredResponse.Extensions)
+		if err != nil {
+			t.Fatalf("Failed to create payment payload: %v", err)
+		}
+
+		if !evm.IsUptoPermit2Payload(paymentPayload.Payload) {
+			t.Error("Expected upto Permit2 payload")
+		}
+
+		uptoPayload, err := evm.UptoPermit2PayloadFromMap(paymentPayload.Payload)
+		if err != nil {
+			t.Fatalf("Failed to parse upto Permit2 payload: %v", err)
+		}
+
+		if uptoPayload.Permit2Authorization.Spender != evm.X402UptoPermit2ProxyAddress {
+			t.Errorf("Expected spender %s, got %s", evm.X402UptoPermit2ProxyAddress, uptoPayload.Permit2Authorization.Spender)
+		}
+
+		if uptoPayload.Permit2Authorization.Witness.Facilitator == "" {
+			t.Error("Expected facilitator in witness")
+		}
+
+		accepted := server.FindMatchingRequirements(accepts, paymentPayload)
+		if accepted == nil {
+			t.Fatal("No matching payment requirements found")
+		}
+
+		verifyResponse, err := server.VerifyPayment(ctx, paymentPayload, *accepted)
+		if err != nil {
+			t.Fatalf("Failed to verify payment: %v", err)
+		}
+		if !verifyResponse.IsValid {
+			t.Fatalf("Payment verification failed: %s", verifyResponse.InvalidReason)
+		}
+
+		settleResponse, err := server.SettlePayment(ctx, paymentPayload, *accepted, nil)
+		if err != nil {
+			t.Fatalf("Failed to settle payment: %v", err)
+		}
+		if !settleResponse.Success {
+			t.Fatalf("Payment settlement failed: %s", settleResponse.ErrorReason)
+		}
+		if settleResponse.Transaction == "" {
+			t.Error("Expected transaction hash in settlement response")
+		}
+	})
+
+	t.Run("Upto EVM V2 Permit2 - Partial Settlement", func(t *testing.T) {
+		waitForPendingTransactions(t, ctx, facilitatorPrivateKey, rpcURL)
+
+		revokePermit2Approval(t, ctx, clientPrivateKey,
+			"0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			rpcURL,
+		)
+
+		clientEthClient, err := ethclient.Dial(rpcURL)
+		if err != nil {
+			t.Fatalf("Failed to connect to Base Sepolia: %v", err)
+		}
+		defer clientEthClient.Close()
+		clientSigner, err := evmsigners.NewClientSignerFromPrivateKeyWithClient(clientPrivateKey, clientEthClient)
+		if err != nil {
+			t.Fatalf("Failed to create client signer: %v", err)
+		}
+
+		client := x402.Newx402Client()
+		client.Register("eip155:84532", uptoevmclient.NewUptoEvmScheme(clientSigner, nil))
+
+		facilitatorSigner, err := newPermit2FacilitatorEvmSigner(ctx, facilitatorPrivateKey, rpcURL)
+		if err != nil {
+			t.Fatalf("Failed to create facilitator signer: %v", err)
+		}
+
+		facilitator := x402.Newx402Facilitator()
+		facilitator.Register([]x402.Network{"eip155:84532"}, uptoevmfacilitator.NewUptoEvmScheme(facilitatorSigner, nil))
+
+		facilitatorClient := &localEvmFacilitatorClient{facilitator: facilitator}
+
+		server := x402.Newx402ResourceServer(x402.WithFacilitatorClient(facilitatorClient))
+		server.Register("eip155:84532", uptoevmserver.NewUptoEvmScheme())
+
+		err = server.Initialize(ctx)
+		if err != nil {
+			t.Fatalf("Failed to initialize server: %v", err)
+		}
+
+		// Build requirements with max amount of 1000 (0.001 USDC)
+		accepts, err := server.BuildPaymentRequirementsFromConfig(ctx, x402.ResourceConfig{
+			Scheme:            evm.SchemeUpto,
+			Network:           "eip155:84532",
+			PayTo:             resourceServerAddress,
+			Price:             "$0.001",
+			MaxTimeoutSeconds: 300,
+		})
+		if err != nil {
+			t.Fatalf("Failed to build payment requirements: %v", err)
+		}
+
+		resource := &types.ResourceInfo{
+			URL:         "https://api.example.com/upto-partial",
+			Description: "Upto Partial Settlement Test",
+			MimeType:    "application/json",
+		}
+
+		serverExtensions := map[string]interface{}{
+			"eip2612GasSponsoring": map[string]interface{}{
+				"info":   map[string]interface{}{"description": "EIP-2612 gas sponsoring", "version": "1"},
+				"schema": map[string]interface{}{},
+			},
+		}
+		paymentRequiredResponse := server.CreatePaymentRequiredResponse(accepts, resource, "", serverExtensions)
+
+		selected, err := client.SelectPaymentRequirements(accepts)
+		if err != nil {
+			t.Fatalf("Failed to select payment requirements: %v", err)
+		}
+
+		paymentPayload, err := client.CreatePaymentPayload(ctx, selected, resource, paymentRequiredResponse.Extensions)
+		if err != nil {
+			t.Fatalf("Failed to create payment payload: %v", err)
+		}
+
+		accepted := server.FindMatchingRequirements(accepts, paymentPayload)
+		if accepted == nil {
+			t.Fatal("No matching payment requirements found")
+		}
+
+		verifyResponse, err := server.VerifyPayment(ctx, paymentPayload, *accepted)
+		if err != nil {
+			t.Fatalf("Failed to verify payment: %v", err)
+		}
+		if !verifyResponse.IsValid {
+			t.Fatalf("Payment verification failed: %s", verifyResponse.InvalidReason)
+		}
+
+		// Settle with partial amount (500 out of 1000 authorized max)
+		overrides := &x402.SettlementOverrides{Amount: "500"}
+		settleResponse, err := server.SettlePayment(ctx, paymentPayload, *accepted, overrides)
+		if err != nil {
+			t.Fatalf("Failed to settle partial payment: %v", err)
+		}
+		if !settleResponse.Success {
+			t.Fatalf("Partial payment settlement failed: %s", settleResponse.ErrorReason)
+		}
+		if settleResponse.Transaction == "" {
+			t.Error("Expected transaction hash for partial settlement")
+		}
+		if settleResponse.Amount != "500" {
+			t.Errorf("Expected settle amount '500', got '%s'", settleResponse.Amount)
+		}
+	})
+
+	t.Run("Upto EVM V2 Permit2 - Zero Settlement", func(t *testing.T) {
+		clientEthClient, err := ethclient.Dial(rpcURL)
+		if err != nil {
+			t.Fatalf("Failed to connect to Base Sepolia: %v", err)
+		}
+		defer clientEthClient.Close()
+		clientSigner, err := evmsigners.NewClientSignerFromPrivateKeyWithClient(clientPrivateKey, clientEthClient)
+		if err != nil {
+			t.Fatalf("Failed to create client signer: %v", err)
+		}
+
+		client := x402.Newx402Client()
+		client.Register("eip155:84532", uptoevmclient.NewUptoEvmScheme(clientSigner, nil))
+
+		facilitatorSigner, err := newPermit2FacilitatorEvmSigner(ctx, facilitatorPrivateKey, rpcURL)
+		if err != nil {
+			t.Fatalf("Failed to create facilitator signer: %v", err)
+		}
+
+		facilitator := x402.Newx402Facilitator()
+		facilitator.Register([]x402.Network{"eip155:84532"}, uptoevmfacilitator.NewUptoEvmScheme(facilitatorSigner, nil))
+
+		facilitatorClient := &localEvmFacilitatorClient{facilitator: facilitator}
+
+		server := x402.Newx402ResourceServer(x402.WithFacilitatorClient(facilitatorClient))
+		server.Register("eip155:84532", uptoevmserver.NewUptoEvmScheme())
+
+		err = server.Initialize(ctx)
+		if err != nil {
+			t.Fatalf("Failed to initialize server: %v", err)
+		}
+
+		accepts, err := server.BuildPaymentRequirementsFromConfig(ctx, x402.ResourceConfig{
+			Scheme:            evm.SchemeUpto,
+			Network:           "eip155:84532",
+			PayTo:             resourceServerAddress,
+			Price:             "$0.001",
+			MaxTimeoutSeconds: 300,
+		})
+		if err != nil {
+			t.Fatalf("Failed to build payment requirements: %v", err)
+		}
+
+		resource := &types.ResourceInfo{
+			URL:         "https://api.example.com/upto-zero",
+			Description: "Upto Zero Settlement Test",
+			MimeType:    "application/json",
+		}
+
+		paymentRequiredResponse := server.CreatePaymentRequiredResponse(accepts, resource, "", nil)
+
+		selected, err := client.SelectPaymentRequirements(accepts)
+		if err != nil {
+			t.Fatalf("Failed to select payment requirements: %v", err)
+		}
+
+		paymentPayload, err := client.CreatePaymentPayload(ctx, selected, resource, paymentRequiredResponse.Extensions)
+		if err != nil {
+			t.Fatalf("Failed to create payment payload: %v", err)
+		}
+
+		accepted := server.FindMatchingRequirements(accepts, paymentPayload)
+		if accepted == nil {
+			t.Fatal("No matching payment requirements found")
+		}
+
+		// Settle with zero amount — no on-chain tx
+		overrides := &x402.SettlementOverrides{Amount: "0"}
+		settleResponse, err := server.SettlePayment(ctx, paymentPayload, *accepted, overrides)
+		if err != nil {
+			t.Fatalf("Failed to settle zero payment: %v", err)
+		}
+		if !settleResponse.Success {
+			t.Fatalf("Zero settlement failed: %s", settleResponse.ErrorReason)
+		}
+		if settleResponse.Transaction != "" {
+			t.Error("Expected empty transaction hash for zero settlement")
+		}
+		if settleResponse.Amount != "0" {
+			t.Errorf("Expected settle amount '0', got '%s'", settleResponse.Amount)
+		}
+	})
+}
+
+// forcedPendingReceiptSigner wraps a real FacilitatorEvmSigner and, while
+// ForcePending is true, forces WaitForTransactionReceipt to observe a
+// deadline so short it cannot possibly see the real confirmation, regardless
+// of the ctx/network timing the surrounding call was given. Every other
+// method (WriteContract, SendTransaction, GetCode, etc.) is delegated
+// unmodified via interface embedding, so broadcasts are always real on-chain
+// transactions. This gives deterministic, network-speed-independent coverage
+// of the settlement_pending path without racing a real chain's block time.
+type forcedPendingReceiptSigner struct {
+	evm.FacilitatorEvmSigner
+	forcePending atomic.Bool
+}
+
+func (s *forcedPendingReceiptSigner) WaitForTransactionReceipt(ctx context.Context, txHash string) (*evm.TransactionReceipt, error) {
+	if s.forcePending.Load() {
+		forcedCtx, cancel := context.WithTimeout(ctx, time.Millisecond)
+		defer cancel()
+		return s.FacilitatorEvmSigner.WaitForTransactionReceipt(forcedCtx, txHash)
+	}
+	return s.FacilitatorEvmSigner.WaitForTransactionReceipt(ctx, txHash)
+}
+
+// TestEVMIntegrationV2_SettlementPendingReconciliation exercises the
+// settlement-pending-auto-recovery mechanism layer against a real on-chain
+// EIP-3009 settlement: the first Settle call broadcasts for real but is
+// forced (via forcedPendingReceiptSigner) to fail its receipt wait, producing
+// a settlement_pending SettleError with the broadcast hash attached and a
+// PendingSettlementStore entry populated. A second Settle call with the same
+// payload, now with receipt-waiting un-forced, must hit the pending-store
+// fast path (skip verify/broadcast) and reconcile against that
+// already-broadcast transaction, returning success once it actually confirms
+// on-chain — and, critically, with the SAME transaction hash as the first
+// attempt, proving no second transaction was ever broadcast.
+func TestEVMIntegrationV2_SettlementPendingReconciliation(t *testing.T) {
+	clientPrivateKey := os.Getenv("EVM_CLIENT_PRIVATE_KEY")
+	facilitatorPrivateKey := os.Getenv("EVM_FACILITATOR_PRIVATE_KEY")
+	resourceServerAddress := os.Getenv("EVM_RESOURCE_SERVER_ADDRESS")
+
+	if clientPrivateKey == "" || facilitatorPrivateKey == "" || resourceServerAddress == "" {
+		t.Skip("Skipping settlement_pending reconciliation test: EVM_CLIENT_PRIVATE_KEY, EVM_FACILITATOR_PRIVATE_KEY, and EVM_RESOURCE_SERVER_ADDRESS must be set")
+	}
+
+	clientSigner, err := newRealClientEvmSigner(clientPrivateKey)
+	if err != nil {
+		t.Fatalf("Failed to create client signer: %v", err)
+	}
+	client := x402.Newx402Client()
+	client.Register("eip155:84532", exactevmclient.NewExactEvmScheme(clientSigner, nil))
+
+	realFacilitatorSigner, err := newRealFacilitatorEvmSigner(facilitatorPrivateKey, "https://sepolia.base.org")
+	if err != nil {
+		t.Fatalf("Failed to create facilitator signer: %v", err)
+	}
+	facilitatorSigner := &forcedPendingReceiptSigner{FacilitatorEvmSigner: realFacilitatorSigner}
+	evmFacilitatorScheme := exactevmfacilitator.NewExactEvmScheme(facilitatorSigner, &exactevmfacilitator.ExactEvmSchemeConfig{})
+
+	accepts := []types.PaymentRequirements{
+		{
+			Scheme:  evm.SchemeExact,
+			Network: "eip155:84532",
+			Asset:   "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // USDC on Base Sepolia
+			Amount:  "1000",
+			PayTo:   resourceServerAddress,
+			Extra:   map[string]interface{}{"name": "USDC", "version": "2"},
+		},
+	}
+	resource := &types.ResourceInfo{URL: "https://api.example.com/premium"}
+
+	selected, err := client.SelectPaymentRequirements(accepts)
+	if err != nil {
+		t.Fatalf("Failed to select payment requirements: %v", err)
+	}
+	paymentPayload, err := client.CreatePaymentPayload(context.Background(), selected, resource, nil)
+	if err != nil {
+		t.Fatalf("Failed to create payment payload: %v", err)
+	}
+
+	// Attempt 1: broadcast is real; the receipt wait is forced to fail
+	// regardless of real chain confirmation speed.
+	facilitatorSigner.forcePending.Store(true)
+
+	_, settleErr := evmFacilitatorScheme.Settle(context.Background(), paymentPayload, accepts[0], nil)
+	if settleErr == nil {
+		t.Fatal("Expected settlement_pending error from a deliberately forced receipt-wait failure, got nil error")
+	}
+	var se *x402.SettleError
+	if !errors.As(settleErr, &se) {
+		t.Fatalf("Expected a *x402.SettleError, got %T: %v", settleErr, settleErr)
+	}
+	if se.ErrorReason != evm.ErrSettlementPending {
+		t.Fatalf("Expected errorReason %q, got %q (%v)", evm.ErrSettlementPending, se.ErrorReason, se)
+	}
+	if se.Transaction == "" {
+		t.Fatal("Expected a broadcast transaction hash on the settlement_pending error")
+	}
+	firstTxHash := se.Transaction
+
+	// Attempt 2: identical payload/requirements, receipt-waiting no longer
+	// forced to fail. Must reconcile against firstTxHash (pending-store hit)
+	// rather than re-verifying and re-broadcasting.
+	facilitatorSigner.forcePending.Store(false)
+
+	settleResponse, settleErr := evmFacilitatorScheme.Settle(context.Background(), paymentPayload, accepts[0], nil)
+	if settleErr != nil {
+		t.Fatalf("Expected the reconciliation settle to succeed once the original tx confirms, got error: %v", settleErr)
+	}
+	if !settleResponse.Success {
+		t.Fatalf("Expected reconciled settlement to succeed, got: %+v", settleResponse)
+	}
+	if settleResponse.Transaction != firstTxHash {
+		t.Fatalf("Reconciliation must reuse the already-broadcast transaction (no second broadcast): first=%s second=%s",
+			firstTxHash, settleResponse.Transaction)
+	}
+}
+
+// TestEVMIntegrationV2_ResourceServerSettlementPendingRetry exercises the
+// generic x402ResourceServer.SettlePayment single-retry-on-settlement_pending
+// path (settleWithPendingRetry in server.go) against a real broadcast. While
+// forcedPendingReceiptSigner.forcePending is true for the whole call, both
+// the initial attempt and the SDK's automatic single retry are forced to
+// fail their receipt wait, so both are expected to observe
+// settlement_pending. The key assertion is that the retry's reported
+// transaction hash is identical to the first attempt's, proving the
+// resource-server retry drove the mechanism's pending-cache fast path
+// (reconciling against the one broadcast transaction) rather than causing a
+// second on-chain broadcast.
+func TestEVMIntegrationV2_ResourceServerSettlementPendingRetry(t *testing.T) {
+	clientPrivateKey := os.Getenv("EVM_CLIENT_PRIVATE_KEY")
+	facilitatorPrivateKey := os.Getenv("EVM_FACILITATOR_PRIVATE_KEY")
+	resourceServerAddress := os.Getenv("EVM_RESOURCE_SERVER_ADDRESS")
+
+	if clientPrivateKey == "" || facilitatorPrivateKey == "" || resourceServerAddress == "" {
+		t.Skip("Skipping resource-server settlement_pending retry test: EVM_CLIENT_PRIVATE_KEY, EVM_FACILITATOR_PRIVATE_KEY, and EVM_RESOURCE_SERVER_ADDRESS must be set")
+	}
+
+	clientSigner, err := newRealClientEvmSigner(clientPrivateKey)
+	if err != nil {
+		t.Fatalf("Failed to create client signer: %v", err)
+	}
+	client := x402.Newx402Client()
+	client.Register("eip155:84532", exactevmclient.NewExactEvmScheme(clientSigner, nil))
+
+	realFacilitatorSigner, err := newRealFacilitatorEvmSigner(facilitatorPrivateKey, "https://sepolia.base.org")
+	if err != nil {
+		t.Fatalf("Failed to create facilitator signer: %v", err)
+	}
+	facilitatorSigner := &forcedPendingReceiptSigner{FacilitatorEvmSigner: realFacilitatorSigner}
+	facilitator := x402.Newx402Facilitator()
+	facilitator.Register([]x402.Network{"eip155:84532"}, exactevmfacilitator.NewExactEvmScheme(facilitatorSigner, &exactevmfacilitator.ExactEvmSchemeConfig{}))
+	facilitatorClient := &localEvmFacilitatorClient{facilitator: facilitator}
+
+	server := x402.Newx402ResourceServer(x402.WithFacilitatorClient(facilitatorClient))
+	server.Register("eip155:84532", exactevmserver.NewExactEvmScheme())
+	if err := server.Initialize(context.Background()); err != nil {
+		t.Fatalf("Failed to initialize server: %v", err)
+	}
+
+	accepts := []types.PaymentRequirements{
+		{
+			Scheme:  evm.SchemeExact,
+			Network: "eip155:84532",
+			Asset:   "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			Amount:  "1000",
+			PayTo:   resourceServerAddress,
+			Extra:   map[string]interface{}{"name": "USDC", "version": "2"},
+		},
+	}
+	resource := &types.ResourceInfo{URL: "https://api.example.com/premium"}
+
+	selected, err := client.SelectPaymentRequirements(accepts)
+	if err != nil {
+		t.Fatalf("Failed to select payment requirements: %v", err)
+	}
+	paymentPayload, err := client.CreatePaymentPayload(context.Background(), selected, resource, nil)
+	if err != nil {
+		t.Fatalf("Failed to create payment payload: %v", err)
+	}
+	accepted := server.FindMatchingRequirements(accepts, paymentPayload)
+	if accepted == nil {
+		t.Fatal("No matching payment requirements found")
+	}
+
+	facilitatorSigner.forcePending.Store(true)
+
+	_, settleErr := server.SettlePayment(context.Background(), paymentPayload, *accepted, nil)
+	if settleErr == nil {
+		t.Fatal("Expected the resource server's (retried) settle to still return settlement_pending while receipt-waiting is forced to fail, got nil error")
+	}
+	var se *x402.SettleError
+	if !errors.As(settleErr, &se) {
+		t.Fatalf("Expected a *x402.SettleError, got %T: %v", settleErr, settleErr)
+	}
+	if se.ErrorReason != evm.ErrSettlementPending {
+		t.Fatalf("Expected errorReason %q after the single automatic retry, got %q (%v)", evm.ErrSettlementPending, se.ErrorReason, se)
+	}
+	if se.Transaction == "" {
+		t.Fatal("Expected a broadcast transaction hash after the retried settlement_pending")
+	}
+	firstAttemptTxHash := se.Transaction
+
+	// Reconcile with receipt-waiting no longer forced to fail, directly
+	// against the resource server (its facilitator client shares the same
+	// in-process mechanism/pending-store instance) to confirm exactly one
+	// transaction was ever broadcast across every attempt so far.
+	facilitatorSigner.forcePending.Store(false)
+
+	settleResponse, settleErr := server.SettlePayment(context.Background(), paymentPayload, *accepted, nil)
+	if settleErr != nil {
+		t.Fatalf("Expected final reconciliation to succeed once the original tx confirms, got error: %v", settleErr)
+	}
+	if !settleResponse.Success {
+		t.Fatalf("Expected final reconciled settlement to succeed, got: %+v", settleResponse)
+	}
+	if settleResponse.Transaction != firstAttemptTxHash {
+		t.Fatalf("Resource-server retry must not cause a second broadcast: first-attempt tx=%s final tx=%s",
+			firstAttemptTxHash, settleResponse.Transaction)
+	}
+}
+
+// TestEVMIntegrationV2UptoPermit2_SettlementPendingReconciliation exercises
+// the settlement-pending-auto-recovery mechanism layer against a real
+// on-chain EVM upto Permit2 settlement, mirroring
+// TestEVMIntegrationV2_SettlementPendingReconciliation's EIP-3009 coverage
+// for the separate upto/Permit2 mechanism code path: the first settle
+// broadcasts for real but is forced (via forcedPendingReceiptSigner) to fail
+// its receipt wait, producing a settlement_pending SettleError with the
+// broadcast hash attached. A second settle with the identical payload, now
+// with receipt-waiting no longer forced to fail, must hit the pending-store
+// fast path and reconcile against that already-broadcast transaction — with
+// the SAME transaction hash as the first attempt, proving no second
+// broadcast occurred.
+func TestEVMIntegrationV2UptoPermit2_SettlementPendingReconciliation(t *testing.T) {
+	clientPrivateKey := os.Getenv("EVM_CLIENT_PRIVATE_KEY")
+	facilitatorPrivateKey := os.Getenv("EVM_FACILITATOR_PRIVATE_KEY")
+	resourceServerAddress := os.Getenv("EVM_RESOURCE_SERVER_ADDRESS")
+
+	if clientPrivateKey == "" || facilitatorPrivateKey == "" || resourceServerAddress == "" {
+		t.Skip("Skipping EVM upto Permit2 settlement_pending reconciliation test: EVM_CLIENT_PRIVATE_KEY, EVM_FACILITATOR_PRIVATE_KEY, and EVM_RESOURCE_SERVER_ADDRESS must be set")
+	}
+
+	ctx := context.Background()
+	rpcURL := "https://sepolia.base.org"
+
+	waitForPendingTransactions(t, ctx, facilitatorPrivateKey, rpcURL)
+	revokePermit2Approval(t, ctx, clientPrivateKey,
+		"0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+		rpcURL,
+	)
+
+	clientEthClient, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		t.Fatalf("Failed to connect to Base Sepolia: %v", err)
+	}
+	defer clientEthClient.Close()
+	clientSigner, err := evmsigners.NewClientSignerFromPrivateKeyWithClient(clientPrivateKey, clientEthClient)
+	if err != nil {
+		t.Fatalf("Failed to create client signer: %v", err)
+	}
+	client := x402.Newx402Client()
+	client.Register("eip155:84532", uptoevmclient.NewUptoEvmScheme(clientSigner, nil))
+
+	realFacilitatorSigner, err := newPermit2FacilitatorEvmSigner(ctx, facilitatorPrivateKey, rpcURL)
+	if err != nil {
+		t.Fatalf("Failed to create facilitator signer: %v", err)
+	}
+	facilitatorSigner := &forcedPendingReceiptSigner{FacilitatorEvmSigner: realFacilitatorSigner}
+	uptoFacilitatorScheme := uptoevmfacilitator.NewUptoEvmScheme(facilitatorSigner, nil)
+
+	server := x402.Newx402ResourceServer(x402.WithFacilitatorClient(&localEvmFacilitatorClient{
+		facilitator: func() *x402.X402Facilitator {
+			f := x402.Newx402Facilitator()
+			f.Register([]x402.Network{"eip155:84532"}, uptoFacilitatorScheme)
+			return f
+		}(),
+	}))
+	server.Register("eip155:84532", uptoevmserver.NewUptoEvmScheme())
+	if err := server.Initialize(ctx); err != nil {
+		t.Fatalf("Failed to initialize server: %v", err)
+	}
+
+	accepts, err := server.BuildPaymentRequirementsFromConfig(ctx, x402.ResourceConfig{
+		Scheme:            evm.SchemeUpto,
+		Network:           "eip155:84532",
+		PayTo:             resourceServerAddress,
+		Price:             "$0.001",
+		MaxTimeoutSeconds: 300,
+	})
+	if err != nil {
+		t.Fatalf("Failed to build payment requirements: %v", err)
+	}
+	resource := &types.ResourceInfo{URL: "https://api.example.com/upto-permit2-pending"}
+	serverExtensions := map[string]interface{}{
+		"eip2612GasSponsoring": map[string]interface{}{
+			"info":   map[string]interface{}{"description": "EIP-2612 gas sponsoring", "version": "1"},
+			"schema": map[string]interface{}{},
+		},
+	}
+	paymentRequiredResponse := server.CreatePaymentRequiredResponse(accepts, resource, "", serverExtensions)
+
+	selected, err := client.SelectPaymentRequirements(accepts)
+	if err != nil {
+		t.Fatalf("Failed to select payment requirements: %v", err)
+	}
+	paymentPayload, err := client.CreatePaymentPayload(ctx, selected, resource, paymentRequiredResponse.Extensions)
+	if err != nil {
+		t.Fatalf("Failed to create payment payload: %v", err)
+	}
+	accepted := server.FindMatchingRequirements(accepts, paymentPayload)
+	if accepted == nil {
+		t.Fatal("No matching payment requirements found")
+	}
+
+	// Verify first, matching the standard client/server/facilitator flow:
+	// this also lets the client's Permit2 approval transaction (sent as
+	// part of CreatePaymentPayload right after the revoke above) land
+	// on-chain before settlement is attempted.
+	verifyResponse, err := uptoFacilitatorScheme.Verify(ctx, paymentPayload, *accepted, nil)
+	if err != nil {
+		t.Fatalf("Failed to verify payment: %v", err)
+	}
+	if !verifyResponse.IsValid {
+		t.Fatalf("Payment verification failed: %s", verifyResponse.InvalidReason)
+	}
+
+	// Attempt 1: broadcast is real; the receipt wait is forced to fail
+	// regardless of real chain confirmation speed. Call the mechanism
+	// directly (bypassing the resource server's own single-retry) so this
+	// test isolates the mechanism-level pending-store fast path, matching
+	// TestEVMIntegrationV2_SettlementPendingReconciliation's approach.
+	facilitatorSigner.forcePending.Store(true)
+
+	_, settleErr := uptoFacilitatorScheme.Settle(ctx, paymentPayload, *accepted, nil)
+	if settleErr == nil {
+		t.Fatal("Expected settlement_pending error from a deliberately forced receipt-wait failure, got nil error")
+	}
+	var se *x402.SettleError
+	if !errors.As(settleErr, &se) {
+		t.Fatalf("Expected a *x402.SettleError, got %T: %v", settleErr, settleErr)
+	}
+	if se.ErrorReason != evm.ErrSettlementPending {
+		t.Fatalf("Expected errorReason %q, got %q (%v)", evm.ErrSettlementPending, se.ErrorReason, se)
+	}
+	if se.Transaction == "" {
+		t.Fatal("Expected a broadcast transaction hash on the settlement_pending error")
+	}
+	firstTxHash := se.Transaction
+
+	// Attempt 2: identical payload/requirements, receipt-waiting no longer
+	// forced to fail. Must reconcile against firstTxHash (pending-store hit)
+	// rather than re-verifying and re-broadcasting.
+	facilitatorSigner.forcePending.Store(false)
+
+	settleResponse, settleErr := uptoFacilitatorScheme.Settle(ctx, paymentPayload, *accepted, nil)
+	if settleErr != nil {
+		t.Fatalf("Expected the reconciliation settle to succeed once the original tx confirms, got error: %v", settleErr)
+	}
+	if !settleResponse.Success {
+		t.Fatalf("Expected reconciled settlement to succeed, got: %+v", settleResponse)
+	}
+	if settleResponse.Transaction != firstTxHash {
+		t.Fatalf("Reconciliation must reuse the already-broadcast transaction (no second broadcast): first=%s second=%s",
+			firstTxHash, settleResponse.Transaction)
+	}
+}

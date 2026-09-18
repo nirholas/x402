@@ -1,8 +1,10 @@
 package mcp
 
 import (
-	x402 "github.com/coinbase/x402/go"
-	"github.com/coinbase/x402/go/types"
+	"time"
+
+	x402 "github.com/x402-foundation/x402/go/v2"
+	"github.com/x402-foundation/x402/go/v2/types"
 )
 
 // Protocol constants for MCP x402 payment integration.
@@ -54,7 +56,7 @@ type AfterPaymentContext struct {
 	SettleResponse *x402.SettleResponse
 }
 
-// Options configures x402MCPClient behavior
+// Options configures x402MCPClient behavior.
 type Options struct {
 	// AutoPayment enables automatic payment handling when a tool requires payment.
 	// Defaults to true. When nil, defaults to true. Set to BoolPtr(false) to disable.
@@ -63,6 +65,9 @@ type Options struct {
 	// OnPaymentRequested is called before creating a payment, allowing the caller
 	// to approve or deny. Return (true, nil) to approve, (false, nil) to deny.
 	OnPaymentRequested func(context PaymentRequiredContext) (bool, error)
+
+	// MaxRequestTimeout caps derived waits from accept maxTimeoutSeconds (zero → 10m).
+	MaxRequestTimeout time.Duration
 }
 
 // BoolPtr returns a pointer to the given bool value.
@@ -99,9 +104,10 @@ type MCPToolCallResult struct {
 
 // PaymentWrapperConfig configures payment wrapper behavior
 type PaymentWrapperConfig struct {
-	Accepts  []types.PaymentRequirements
-	Resource *ResourceInfo
-	Hooks    *PaymentWrapperHooks
+	Accepts    []types.PaymentRequirements
+	Resource   *ResourceInfo
+	Hooks      *PaymentWrapperHooks
+	Extensions map[string]interface{}
 }
 
 // ResourceInfo provides resource metadata. Alias for types.ResourceInfo for compatibility.

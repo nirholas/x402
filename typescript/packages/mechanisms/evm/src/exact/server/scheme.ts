@@ -1,24 +1,32 @@
 import {
   AssetAmount,
   Network,
+  PaymentFlowConfig,
   PaymentRequirements,
   Price,
   SchemeNetworkServer,
   MoneyParser,
 } from "@x402/core/types";
-import { getDefaultAsset, type ExactDefaultAssetInfo } from "../../shared/defaultAssets";
+import { convertToTokenAmount, parseMoney } from "@x402/core/utils";
+import { findDefaultAsset, getDefaultAsset, type ExactDefaultAssetInfo } from "../../defaultAssets";
+import type { AssetTransferMethod } from "../../types";
 
 /**
  * EVM server implementation for the Exact payment scheme.
  */
 export class ExactEvmScheme implements SchemeNetworkServer {
   readonly scheme = "exact";
+  readonly defaultAssetTransferMethod: AssetTransferMethod = "eip3009";
+  readonly paymentFlows = {
+    eip3009: { supported: ["authorization", "upfront"], default: "authorization" },
+    permit2: { supported: ["authorization", "upfront"], default: "authorization" },
+  } as const satisfies Record<AssetTransferMethod, PaymentFlowConfig>;
   private moneyParsers: MoneyParser[] = [];
 
   /**
    * Register a custom money parser in the parser chain.
    * Multiple parsers can be registered - they will be tried in registration order.
-   * Each parser receives a decimal amount (e.g., 1.50 for $1.50).
+   * Each parser receives a decimal string (e.g., "1.50" for $1.50).
    * If a parser returns null, the next parser in the chain will be tried.
    * The default parser is always the final fallback.
    *
@@ -28,9 +36,9 @@ export class ExactEvmScheme implements SchemeNetworkServer {
    * @example
    * evmServer.registerMoneyParser(async (amount, network) => {
    *   // Custom conversion logic
-   *   if (amount > 100) {
+   *   if (Number(amount) > 100) {
    *     // Use different token for large amounts
-   *     return { amount: (amount * 1e18).toString(), asset: "0xCustomToken" };
+   *     return { amount: convertToTokenAmount(String(amount), 18), asset: "0xCustomToken" };
    *   }
    *   return null; // Use next parser
    * });
@@ -38,6 +46,17 @@ export class ExactEvmScheme implements SchemeNetworkServer {
   registerMoneyParser(parser: MoneyParser): ExactEvmScheme {
     this.moneyParsers.push(parser);
     return this;
+  }
+
+  /**
+   * Decimals for a known default asset, or undefined.
+   *
+   * @param asset - Asset address or symbol
+   * @param network - Target network
+   * @returns Decimals when the asset is a known default; otherwise undefined
+   */
+  getAssetDecimals(asset: string, network: Network): number | undefined {
+    return findDefaultAsset(asset, network)?.decimals;
   }
 
   /**
@@ -63,8 +82,7 @@ export class ExactEvmScheme implements SchemeNetworkServer {
       };
     }
 
-    // Parse Money to decimal number
-    const amount = this.parseMoneyToDecimal(price);
+    const { amount, symbol } = parseMoney(price);
 
     // Try each custom money parser in order
     for (const parser of this.moneyParsers) {
@@ -75,7 +93,7 @@ export class ExactEvmScheme implements SchemeNetworkServer {
     }
 
     // All custom parsers returned null, use default conversion
-    return this.defaultMoneyConversion(amount, network);
+    return this.defaultMoneyConversion(amount, network, symbol);
   }
 
   /**
@@ -107,38 +125,16 @@ export class ExactEvmScheme implements SchemeNetworkServer {
   }
 
   /**
-   * Parse Money (string | number) to a decimal number.
-   * Handles formats like "$1.50", "1.50", 1.50, etc.
-   *
-   * @param money - The money value to parse
-   * @returns Decimal number
-   */
-  private parseMoneyToDecimal(money: string | number): number {
-    if (typeof money === "number") {
-      return money;
-    }
-
-    // Remove $ sign and whitespace, then parse
-    const cleanMoney = money.replace(/^\$/, "").trim();
-    const amount = parseFloat(cleanMoney);
-
-    if (isNaN(amount)) {
-      throw new Error(`Invalid money format: ${money}`);
-    }
-
-    return amount;
-  }
-
-  /**
    * Converts a numeric dollar amount to an AssetAmount using the default token for the network.
    *
-   * @param amount - The dollar amount as a number
+   * @param amount - The decimal amount as a string
    * @param network - The target network
+   * @param symbol - Optional ticker from a suffixed price
    * @returns The converted asset amount with token metadata
    */
-  private defaultMoneyConversion(amount: number, network: Network): AssetAmount {
-    const assetInfo: ExactDefaultAssetInfo = getDefaultAsset(network);
-    const tokenAmount = this.convertToTokenAmount(amount.toString(), assetInfo.decimals);
+  private defaultMoneyConversion(amount: string, network: Network, symbol?: string): AssetAmount {
+    const assetInfo: ExactDefaultAssetInfo = getDefaultAsset(network, symbol);
+    const tokenAmount = convertToTokenAmount(amount, assetInfo.decimals);
 
     // EIP-3009 tokens always need name/version for their transferWithAuthorization domain.
     // Permit2 tokens only need them if the token supports EIP-2612 (for gasless permit signing).
@@ -148,7 +144,7 @@ export class ExactEvmScheme implements SchemeNetworkServer {
 
     return {
       amount: tokenAmount,
-      asset: assetInfo.address,
+      asset: assetInfo.asset,
       extra: {
         ...(includeEip712Domain && {
           name: assetInfo.name,
@@ -159,23 +155,5 @@ export class ExactEvmScheme implements SchemeNetworkServer {
         }),
       },
     };
-  }
-
-  /**
-   * Converts a decimal string amount to an integer token amount using the given decimals.
-   *
-   * @param decimalAmount - The amount as a decimal string (e.g. "1.5")
-   * @param decimals - The number of decimal places for the token
-   * @returns The token amount as an integer string in smallest units
-   */
-  private convertToTokenAmount(decimalAmount: string, decimals: number): string {
-    const amount = parseFloat(decimalAmount);
-    if (isNaN(amount)) {
-      throw new Error(`Invalid amount: ${decimalAmount}`);
-    }
-    const [intPart, decPart = ""] = String(amount).split(".");
-    const paddedDec = decPart.padEnd(decimals, "0").slice(0, decimals);
-    const tokenAmount = (intPart + paddedDec).replace(/^0+/, "") || "0";
-    return tokenAmount;
   }
 }

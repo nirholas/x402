@@ -17,10 +17,13 @@ from .constants import (
     ERR_INVALID_COMPUTE_PRICE,
     ERR_INVALID_INSTRUCTION_COUNT,
     ERR_INVALID_PAYLOAD,
+    ERR_MEMO_COUNT,
+    ERR_MEMO_MISMATCH,
     ERR_MINT_MISMATCH,
     ERR_NETWORK_MISMATCH,
     ERR_NO_TRANSFER_INSTRUCTION,
     ERR_RECIPIENT_MISMATCH,
+    ERR_SETTLEMENT_PENDING,
     ERR_SIMULATION_FAILED,
     ERR_TRANSACTION_DECODE_FAILED,
     ERR_TRANSACTION_FAILED,
@@ -32,6 +35,7 @@ from .constants import (
     MAINNET_RPC_URL,
     MAINNET_WS_URL,
     MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
+    MAX_MEMO_BYTES,
     MEMO_PROGRAM_ADDRESS,
     NETWORK_CONFIGS,
     SCHEME_EXACT,
@@ -51,6 +55,9 @@ from .constants import (
     AssetInfo,
     NetworkConfig,
 )
+
+# Default assets
+from .default_assets import DEFAULT_ASSETS, find_default_asset, get_default_asset
 
 # Settlement cache (shared across V1/V2 facilitator instances)
 from .settlement_cache import SettlementCache
@@ -82,7 +89,6 @@ from .utils import (
     get_usdc_address,
     normalize_network,
     parse_amount,
-    parse_money_to_decimal,
     validate_svm_address,
 )
 
@@ -98,6 +104,7 @@ __all__ = [
     "DEFAULT_COMPUTE_UNIT_LIMIT",
     "DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS",
     "MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS",
+    "MAX_MEMO_BYTES",
     "DEVNET_RPC_URL",
     "TESTNET_RPC_URL",
     "MAINNET_RPC_URL",
@@ -129,6 +136,8 @@ __all__ = [
     "ERR_INVALID_COMPUTE_PRICE",
     "ERR_COMPUTE_PRICE_TOO_HIGH",
     "ERR_NO_TRANSFER_INSTRUCTION",
+    "ERR_MEMO_MISMATCH",
+    "ERR_MEMO_COUNT",
     "ERR_MINT_MISMATCH",
     "ERR_RECIPIENT_MISMATCH",
     "ERR_AMOUNT_INSUFFICIENT",
@@ -137,6 +146,7 @@ __all__ = [
     "ERR_FEE_PAYER_TRANSFERRING",
     "ERR_SIMULATION_FAILED",
     "ERR_TRANSACTION_FAILED",
+    "ERR_SETTLEMENT_PENDING",
     # Types
     "ExactSvmPayload",
     "ExactSvmPayloadV1",
@@ -159,9 +169,12 @@ __all__ = [
     "convert_to_token_amount",
     "parse_amount",
     "format_amount",
-    "parse_money_to_decimal",
     "decode_transaction_from_payload",
     "get_token_payer_from_transaction",
     "extract_transaction_info",
     "derive_ata",
+    # Default assets
+    "DEFAULT_ASSETS",
+    "find_default_asset",
+    "get_default_asset",
 ]

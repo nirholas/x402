@@ -5,8 +5,11 @@ import (
 )
 
 const (
-	// Scheme identifier
-	SchemeExact = "exact"
+	// Scheme identifiers
+	SchemeExact       = "exact"
+	SchemeUpto        = "upto"
+	SchemeBatched     = "batch-settlement"
+	SchemeAuthCapture = "auth-capture"
 
 	// Default token decimals for USDC
 	DefaultDecimals = 6
@@ -18,7 +21,8 @@ const (
 	FunctionTryAggregate              = "tryAggregate"
 
 	// Permit2 function names
-	FunctionSettle = "settle"
+	FunctionSettle           = "settle"
+	FunctionSettleWithPermit = "settleWithPermit"
 
 	// Transaction status
 	TxStatusSuccess = 1
@@ -52,7 +56,7 @@ const (
 
 	// X402UptoPermit2ProxyAddress is the x402 upto payment proxy.
 	// Vanity address: 0x4020...0002 for easy recognition.
-	X402UptoPermit2ProxyAddress = "0x402039b3d6E6BEC5A02c2C9fd937ac17A6940002"
+	X402UptoPermit2ProxyAddress = "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002"
 
 	// Permit2DeadlineBuffer is the time buffer (in seconds) added when checking
 	// deadline expiration to account for block propagation time.
@@ -67,90 +71,30 @@ const (
 
 var (
 	// Network chain IDs
-	ChainIDBase        = big.NewInt(8453)
-	ChainIDBaseSepolia = big.NewInt(84532)
-	ChainIDMegaETH     = big.NewInt(4326)
-	ChainIDMonad       = big.NewInt(143)
-	ChainIDMezoTestnet = big.NewInt(31611)
-	ChainIDStable      = big.NewInt(988)
-
-	// Network configurations
-	// See DEFAULT_ASSET.md for guidelines on adding new chains
-	//
-	// Default Asset Selection Policy:
-	// - Each chain has the right to determine its own default stablecoin
-	// - If the chain has officially endorsed a stablecoin, that asset should be used
-	// - If no official stance exists, the chain team should make the selection
-	//
-	// Both EIP-3009 (transferWithAuthorization) and Permit2 asset transfer methods are supported.
-	// EIP-3009 is the default. Set AssetTransferMethod to AssetTransferMethodPermit2 for tokens
-	// that don't support EIP-3009. See DEFAULT_ASSET.md for details.
-	NetworkConfigs = map[string]NetworkConfig{
-		// Base Mainnet
-		"eip155:8453": {
-			ChainID: ChainIDBase,
-			DefaultAsset: AssetInfo{
-				Address:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC on Base
-				Name:     "USD Coin",
-				Version:  "2",
-				Decimals: DefaultDecimals,
-			},
-		},
-		// Base Sepolia Testnet
-		"eip155:84532": {
-			ChainID: ChainIDBaseSepolia,
-			DefaultAsset: AssetInfo{
-				Address:  "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // USDC on Base Sepolia
-				Name:     "USDC",
-				Version:  "2",
-				Decimals: DefaultDecimals,
-			},
-		},
-		// MegaETH Mainnet (uses Permit2 instead of EIP-3009, supports EIP-2612)
-		"eip155:4326": {
-			ChainID: ChainIDMegaETH,
-			DefaultAsset: AssetInfo{
-				Address:             "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7", // USDM (MegaUSD)
-				Name:                "MegaUSD",
-				Version:             "1",
-				Decimals:            18,
-				AssetTransferMethod: AssetTransferMethodPermit2,
-				SupportsEip2612:     true,
-			},
-		},
-		// Monad Mainnet
-		"eip155:143": {
-			ChainID: ChainIDMonad,
-			DefaultAsset: AssetInfo{
-				Address:  "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", // USDC on Monad
-				Name:     "USD Coin",
-				Version:  "2",
-				Decimals: DefaultDecimals,
-			},
-		},
-		// Mezo Testnet (uses Permit2 instead of EIP-3009, supports EIP-2612)
-		"eip155:31611": {
-			ChainID: ChainIDMezoTestnet,
-			DefaultAsset: AssetInfo{
-				Address:             "0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503", // mUSD on Mezo Testnet
-				Name:                "Mezo USD",
-				Version:             "1",
-				Decimals:            18,
-				AssetTransferMethod: AssetTransferMethodPermit2,
-				SupportsEip2612:     true,
-			},
-		},
-		// Stable Mainnet
-		"eip155:988": {
-			ChainID: ChainIDStable,
-			DefaultAsset: AssetInfo{
-				Address:  "0x779Ded0c9e1022225f8E0630b35a9b54bE713736", // USDT0 on Stable
-				Name:     "USDT0",
-				Version:  "1",
-				Decimals: DefaultDecimals,
-			},
-		},
-	}
+	ChainIDBase          = big.NewInt(8453)
+	ChainIDBaseSepolia   = big.NewInt(84532)
+	ChainIDMegaETH       = big.NewInt(4326)
+	ChainIDMonad         = big.NewInt(143)
+	ChainIDMezo          = big.NewInt(31612)
+	ChainIDMezoTestnet   = big.NewInt(31611)
+	ChainIDStable        = big.NewInt(988)
+	ChainIDStableTestnet = big.NewInt(2201)
+	ChainIDPolygon       = big.NewInt(137)
+	ChainIDArbOne        = big.NewInt(42161)
+	ChainIDArbSepolia    = big.NewInt(421614)
+	ChainIDRadius        = big.NewInt(723487)
+	ChainIDRadiusTestnet = big.NewInt(72344)
+	ChainIDADI           = big.NewInt(36900)
+	ChainIDHPP           = big.NewInt(190415)
+	ChainIDHPPSepolia    = big.NewInt(181228)
+	ChainIDXDC           = big.NewInt(50)
+	ChainIDXDCApothem    = big.NewInt(51)
+	ChainIDIgra          = big.NewInt(38833)
+	ChainIDFlare         = big.NewInt(14)
+	ChainIDCelo          = big.NewInt(42220)
+	ChainIDCeloSepolia   = big.NewInt(11142220)
+	ChainIDSei           = big.NewInt(1329)
+	ChainIDSeiTestnet    = big.NewInt(1328)
 
 	// EIP-3009 ABI for transferWithAuthorization with v,r,s (EOA signatures)
 	TransferWithAuthorizationVRSABI = []byte(`[
@@ -194,6 +138,20 @@ var (
 
 	// Legacy: Combined ABI (deprecated, use specific ABIs above)
 	TransferWithAuthorizationABI = TransferWithAuthorizationVRSABI
+
+	// ERC20TransferEventABI for parsing Transfer event logs
+	ERC20TransferEventABI = []byte(`[
+		{
+			"anonymous": false,
+			"inputs": [
+				{"indexed": true, "name": "from", "type": "address"},
+				{"indexed": true, "name": "to", "type": "address"},
+				{"indexed": false, "name": "value", "type": "uint256"}
+			],
+			"name": "Transfer",
+			"type": "event"
+		}
+	]`)
 
 	// ABI for authorizationState check
 	AuthorizationStateABI = []byte(`[
@@ -364,6 +322,109 @@ var (
 		}
 	]`)
 
+	// X402UptoPermit2ProxySettleABI for calling settle on x402UptoPermit2Proxy.
+	// Differs from exact: takes an additional `amount` param and witness includes `facilitator`.
+	X402UptoPermit2ProxySettleABI = []byte(`[
+		{
+			"type": "function",
+			"name": "settle",
+			"inputs": [
+				{
+					"name": "permit",
+					"type": "tuple",
+					"components": [
+						{
+							"name": "permitted",
+							"type": "tuple",
+							"components": [
+								{"name": "token", "type": "address"},
+								{"name": "amount", "type": "uint256"}
+							]
+						},
+						{"name": "nonce", "type": "uint256"},
+						{"name": "deadline", "type": "uint256"}
+					]
+				},
+				{"name": "amount", "type": "uint256"},
+				{"name": "owner", "type": "address"},
+				{
+					"name": "witness",
+					"type": "tuple",
+					"components": [
+						{"name": "to", "type": "address"},
+						{"name": "facilitator", "type": "address"},
+						{"name": "validAfter", "type": "uint256"}
+					]
+				},
+				{"name": "signature", "type": "bytes"}
+			],
+			"outputs": [],
+			"stateMutability": "nonpayable"
+		}
+	]`)
+
+	// X402UptoPermit2ProxySettleWithPermitABI for calling settleWithPermit on x402UptoPermit2Proxy (EIP-2612 extension).
+	X402UptoPermit2ProxySettleWithPermitABI = []byte(`[
+		{
+			"type": "function",
+			"name": "settleWithPermit",
+			"inputs": [
+				{
+					"name": "permit2612",
+					"type": "tuple",
+					"components": [
+						{"name": "value", "type": "uint256"},
+						{"name": "deadline", "type": "uint256"},
+						{"name": "r", "type": "bytes32"},
+						{"name": "s", "type": "bytes32"},
+						{"name": "v", "type": "uint8"}
+					]
+				},
+				{
+					"name": "permit",
+					"type": "tuple",
+					"components": [
+						{
+							"name": "permitted",
+							"type": "tuple",
+							"components": [
+								{"name": "token", "type": "address"},
+								{"name": "amount", "type": "uint256"}
+							]
+						},
+						{"name": "nonce", "type": "uint256"},
+						{"name": "deadline", "type": "uint256"}
+					]
+				},
+				{"name": "amount", "type": "uint256"},
+				{"name": "owner", "type": "address"},
+				{
+					"name": "witness",
+					"type": "tuple",
+					"components": [
+						{"name": "to", "type": "address"},
+						{"name": "facilitator", "type": "address"},
+						{"name": "validAfter", "type": "uint256"}
+					]
+				},
+				{"name": "signature", "type": "bytes"}
+			],
+			"outputs": [],
+			"stateMutability": "nonpayable"
+		}
+	]`)
+
+	// X402UptoPermit2ProxyPermit2ABI for verifying upto proxy deployment
+	X402UptoPermit2ProxyPermit2ABI = []byte(`[
+		{
+			"inputs": [],
+			"name": "PERMIT2",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		}
+	]`)
+
 	// EIP2612NoncesABI for querying EIP-2612 nonces
 	EIP2612NoncesABI = []byte(`[
 		{
@@ -425,9 +486,6 @@ var (
 			"stateMutability": "nonpayable"
 		}
 	]`)
-
-	// FunctionSettleWithPermit is the function name for EIP-2612 settlement
-	FunctionSettleWithPermit = "settleWithPermit"
 
 	// EIP712DomainTypes defines the standard EIP-712 domain type for Permit2.
 	// Permit2 uses name + chainId + verifyingContract (no version field).
@@ -498,4 +556,36 @@ func GetEIP2612EIP712Types() map[string][]TypedDataField {
 	}
 }
 
-// Note: MaxUint256() is defined in utils.go
+// UptoPermit2WitnessTypes defines the EIP-712 types for the upto Permit2 witness.
+// The upto witness includes a `facilitator` field absent from the exact witness.
+// Only the address matching witness.facilitator can call settle() on-chain.
+// Field order MUST match the on-chain x402UptoPermit2Proxy contract and TypeScript implementation.
+var UptoPermit2WitnessTypes = map[string][]TypedDataField{
+	"PermitWitnessTransferFrom": {
+		{Name: "permitted", Type: "TokenPermissions"},
+		{Name: "spender", Type: "address"},
+		{Name: "nonce", Type: "uint256"},
+		{Name: "deadline", Type: "uint256"},
+		{Name: "witness", Type: "Witness"},
+	},
+	"TokenPermissions": {
+		{Name: "token", Type: "address"},
+		{Name: "amount", Type: "uint256"},
+	},
+	"Witness": {
+		{Name: "to", Type: "address"},
+		{Name: "facilitator", Type: "address"},
+		{Name: "validAfter", Type: "uint256"},
+	},
+}
+
+// GetUptoPermit2EIP712Types returns the complete EIP-712 types map for upto Permit2 signing.
+// This combines the EIP712Domain with the upto-specific Permit2 types (including facilitator in witness).
+func GetUptoPermit2EIP712Types() map[string][]TypedDataField {
+	return map[string][]TypedDataField{
+		"EIP712Domain":              EIP712DomainTypes,
+		"PermitWitnessTransferFrom": UptoPermit2WitnessTypes["PermitWitnessTransferFrom"],
+		"TokenPermissions":          UptoPermit2WitnessTypes["TokenPermissions"],
+		"Witness":                   UptoPermit2WitnessTypes["Witness"],
+	}
+}

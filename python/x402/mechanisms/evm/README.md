@@ -80,7 +80,9 @@ facilitator.register(["eip155:8453", "eip155:84532"], ExactEvmFacilitatorScheme(
 | `FacilitatorEvmSigner` | Protocol for facilitator signers |
 | `EthAccountSigner` | Client signer using eth-account |
 | `FacilitatorWeb3Signer` | Facilitator signer using web3.py |
-| `NETWORK_CONFIGS` | Network configuration mapping |
+| `DEFAULT_ASSETS` | USD-pegged default asset table (CAIP-2 → asset list) |
+| `get_default_asset` / `find_default_asset` | Forward and reverse default-asset lookups |
+| `get_evm_chain_id` | Resolve CAIP-2 chain ID for an EVM network |
 | `V1_NETWORKS` | List of V1 network names |
 
 ## Supported Networks
@@ -104,6 +106,8 @@ Supports ERC-3009 compatible tokens:
 - EURC
 - Any token implementing `transferWithAuthorization()`
 
+For the current list of chains with default assets configured, see [Default Assets for Dollar-String Pricing](../../../../docs/core-concepts/network-and-token-support.mdx#default-assets-for-dollar-string-pricing) in the x402 docs. To add default asset support for a new chain, see [Adding Support for New Networks](../../../../docs/core-concepts/network-and-token-support.mdx#adding-support-for-new-networks).
+
 ## Technical Details
 
 ### EIP-3009 TransferWithAuthorization
@@ -112,12 +116,12 @@ The Exact scheme uses signed authorizations:
 
 ```python
 {
-    "from": "0x...",      # Payer address
-    "to": "0x...",        # Recipient (payTo)
-    "value": 1000000,     # Amount in token units
-    "validAfter": 0,      # Unix timestamp
-    "validBefore": ...,   # Expiration timestamp
-    "nonce": "0x...",     # Random nonce
+    "from": "0x...",  # Payer address
+    "to": "0x...",  # Recipient (payTo)
+    "value": 1000000,  # Amount in token units
+    "validAfter": 0,  # Unix timestamp
+    "validBefore": ...,  # Expiration timestamp
+    "nonce": "0x...",  # Random nonce
 }
 ```
 

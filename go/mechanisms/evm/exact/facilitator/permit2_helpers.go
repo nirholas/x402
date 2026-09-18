@@ -6,8 +6,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	x402 "github.com/coinbase/x402/go"
-	"github.com/coinbase/x402/go/mechanisms/evm"
+	x402 "github.com/x402-foundation/x402/go/v2"
+	"github.com/x402-foundation/x402/go/v2/mechanisms/evm"
 )
 
 // Permit2SettleArgs holds the parsed and typed arguments for settle() / settleWithPermit().
@@ -51,6 +51,10 @@ func BuildPermit2SettleArgs(permit2Payload *evm.ExactPermit2Payload) (*Permit2Se
 	if err != nil {
 		return nil, err
 	}
+	sigData, err := evm.ParseERC6492Signature(signatureBytes)
+	if err != nil {
+		return nil, err
+	}
 
 	args := &Permit2SettleArgs{}
 	args.Permit.Permitted.Token = common.HexToAddress(permit2Payload.Permit2Authorization.Permitted.Token)
@@ -60,7 +64,7 @@ func BuildPermit2SettleArgs(permit2Payload *evm.ExactPermit2Payload) (*Permit2Se
 	args.Owner = common.HexToAddress(permit2Payload.Permit2Authorization.From)
 	args.Witness.To = common.HexToAddress(permit2Payload.Permit2Authorization.Witness.To)
 	args.Witness.ValidAfter = validAfter
-	args.Signature = signatureBytes
+	args.Signature = sigData.InnerSignature
 	return args, nil
 }
 
@@ -215,7 +219,7 @@ func DiagnosePermit2SimulationFailure(
 	return &x402.VerifyResponse{IsValid: false, InvalidReason: ErrPermit2SimulationFailed, Payer: payer}
 }
 
-// CheckPermit2Prerequisites checks proxy deployment, payer token balance and payer ETH balance for gas.
+// CheckPermit2Prerequisites checks proxy deployment and payer token balance.
 func CheckPermit2Prerequisites(
 	ctx context.Context,
 	signer evm.FacilitatorEvmSigner,
@@ -235,14 +239,8 @@ func CheckPermit2Prerequisites(
 			FunctionName: "balanceOf",
 			Args:         []interface{}{common.HexToAddress(payer)},
 		},
-		{
-			Address:      evm.MULTICALL3Address,
-			ABI:          evm.Multicall3GetEthBalanceABI,
-			FunctionName: "getEthBalance",
-			Args:         []interface{}{common.HexToAddress(payer)},
-		},
 	})
-	if err != nil || len(results) < 3 {
+	if err != nil || len(results) < 2 {
 		// Fail open for prerequisites-only check
 		return &x402.VerifyResponse{IsValid: true, Payer: payer}
 	}
@@ -255,16 +253,6 @@ func CheckPermit2Prerequisites(
 	if ok && results[1].Success() {
 		if balance := asBigInt(results[1].Result); balance != nil && balance.Cmp(reqAmount) < 0 {
 			return &x402.VerifyResponse{IsValid: false, InvalidReason: ErrPermit2InsufficientBalance, Payer: payer}
-		}
-	}
-
-	if results[2].Success() {
-		minEthForGas := new(big.Int).Mul(
-			big.NewInt(int64(evm.ERC20ApproveGasLimit)),
-			big.NewInt(int64(evm.DefaultMaxFeePerGas)),
-		)
-		if ethBalance := asBigInt(results[2].Result); ethBalance != nil && ethBalance.Cmp(minEthForGas) < 0 {
-			return &x402.VerifyResponse{IsValid: false, InvalidReason: ErrErc20ApprovalInsufficientEth, Payer: payer}
 		}
 	}
 

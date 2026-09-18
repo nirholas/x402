@@ -254,13 +254,23 @@ type FacilitatorEvmSigner interface {
 	VerifyTypedData(ctx context.Context, address string, domain TypedDataDomain, types map[string][]TypedDataField, primaryType string, message map[string]interface{}, signature []byte) (bool, error)
 
 	// WriteContract executes a smart contract transaction
-	WriteContract(ctx context.Context, address string, abi []byte, functionName string, args ...interface{}) (string, error)
+	WriteContract(ctx context.Context, address string, abi []byte, functionName string, dataSuffix []byte, args ...interface{}) (string, error)
 
 	// SendTransaction sends a raw transaction with arbitrary calldata
 	// Used for smart wallet deployment where calldata is pre-encoded
 	SendTransaction(ctx context.Context, to string, data []byte) (string, error)
 
-	// WaitForTransactionReceipt waits for a transaction to be mined
+	// WaitForTransactionReceipt waits for a transaction to be mined.
+	//
+	// Unlike the TypeScript (viem, confirmationTimeoutMs) and Python (web3.py,
+	// confirmation_timeout_seconds) SDKs, this SDK ships no concrete
+	// FacilitatorEvmSigner — implementations are supplied entirely by the
+	// facilitator. Implementers are responsible for bounding this call
+	// themselves (e.g. an internal deadline, or honoring ctx's deadline) so a
+	// stuck RPC node cannot block a settlement indefinitely. A receipt-wait
+	// failure surfaces to callers as ErrSettlementPending with the broadcast
+	// hash preserved, so timing out is always safe. ~120-180s matches the
+	// other SDKs' defaults.
 	WaitForTransactionReceipt(ctx context.Context, txHash string) (*TransactionReceipt, error)
 
 	// GetBalance gets the balance of an address for a specific token
@@ -290,9 +300,10 @@ type TypedDataField struct {
 
 // TransactionReceipt represents the receipt of a mined transaction
 type TransactionReceipt struct {
-	Status      uint64 `json:"status"`
-	BlockNumber uint64 `json:"blockNumber"`
-	TxHash      string `json:"transactionHash"`
+	Status      uint64            `json:"status"`
+	BlockNumber uint64            `json:"blockNumber"`
+	TxHash      string            `json:"transactionHash"`
+	Logs        []*goethtypes.Log `json:"logs,omitempty"`
 }
 
 // AssetInfo contains information about an ERC20 token
@@ -303,13 +314,6 @@ type AssetInfo struct {
 	Decimals            int
 	AssetTransferMethod AssetTransferMethod
 	SupportsEip2612     bool
-}
-
-// NetworkConfig contains network-specific configuration
-// See DEFAULT_ASSET.md for guidelines on adding new chains
-type NetworkConfig struct {
-	ChainID      *big.Int
-	DefaultAsset AssetInfo
 }
 
 // PayloadToMap converts an ExactEIP3009Payload to a map for JSON marshaling
@@ -362,6 +366,166 @@ func PayloadFromMap(data map[string]interface{}) (*ExactEIP3009Payload, error) {
 	return payload, nil
 }
 
+// UptoPermit2Witness represents the witness data for x402UptoPermit2Proxy.
+// Differs from Permit2Witness by including a Facilitator address field.
+// Only the address matching Facilitator can call settle() on-chain.
+type UptoPermit2Witness struct {
+	To          string `json:"to"`          // Destination address for funds (hex)
+	Facilitator string `json:"facilitator"` // Facilitator address authorized to settle (hex)
+	ValidAfter  string `json:"validAfter"`  // Unix timestamp (decimal string)
+}
+
+// UptoPermit2Authorization represents the Permit2 authorization parameters for the upto scheme.
+type UptoPermit2Authorization struct {
+	From      string                  `json:"from"`      // Signer/owner address (hex)
+	Permitted Permit2TokenPermissions `json:"permitted"` // Token and amount permitted (max charge)
+	Spender   string                  `json:"spender"`   // Must be x402UptoPermit2Proxy address
+	Nonce     string                  `json:"nonce"`     // uint256 nonce as decimal string
+	Deadline  string                  `json:"deadline"`  // Unix timestamp as decimal string
+	Witness   UptoPermit2Witness      `json:"witness"`   // Witness data including facilitator
+}
+
+// UptoPermit2Payload represents the upto Permit2 payment payload sent by clients.
+type UptoPermit2Payload struct {
+	Signature            string                   `json:"signature"`            // EIP-712 signature (hex)
+	Permit2Authorization UptoPermit2Authorization `json:"permit2Authorization"` // Authorization parameters
+}
+
+// ToMap converts an UptoPermit2Payload to a map for JSON marshaling.
+func (p *UptoPermit2Payload) ToMap() map[string]interface{} {
+	return map[string]interface{}{
+		"signature": p.Signature,
+		"permit2Authorization": map[string]interface{}{
+			"from": p.Permit2Authorization.From,
+			"permitted": map[string]interface{}{
+				"token":  p.Permit2Authorization.Permitted.Token,
+				"amount": p.Permit2Authorization.Permitted.Amount,
+			},
+			"spender":  p.Permit2Authorization.Spender,
+			"nonce":    p.Permit2Authorization.Nonce,
+			"deadline": p.Permit2Authorization.Deadline,
+			"witness": map[string]interface{}{
+				"to":          p.Permit2Authorization.Witness.To,
+				"facilitator": p.Permit2Authorization.Witness.Facilitator,
+				"validAfter":  p.Permit2Authorization.Witness.ValidAfter,
+			},
+		},
+	}
+}
+
+// UptoPermit2PayloadFromMap creates an UptoPermit2Payload from a map.
+// Returns an error if required fields are missing or malformed.
+func UptoPermit2PayloadFromMap(data map[string]interface{}) (*UptoPermit2Payload, error) {
+	payload := &UptoPermit2Payload{}
+
+	if sig, ok := data["signature"].(string); ok {
+		payload.Signature = sig
+	}
+
+	auth, ok := data["permit2Authorization"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization field")
+	}
+
+	if from, ok := auth["from"].(string); ok {
+		payload.Permit2Authorization.From = from
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.from field")
+	}
+
+	if spender, ok := auth["spender"].(string); ok {
+		payload.Permit2Authorization.Spender = spender
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.spender field")
+	}
+
+	if nonce, ok := auth["nonce"].(string); ok {
+		payload.Permit2Authorization.Nonce = nonce
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.nonce field")
+	}
+
+	if deadline, ok := auth["deadline"].(string); ok {
+		payload.Permit2Authorization.Deadline = deadline
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.deadline field")
+	}
+
+	permitted, ok := auth["permitted"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.permitted field")
+	}
+
+	if token, ok := permitted["token"].(string); ok {
+		payload.Permit2Authorization.Permitted.Token = token
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.permitted.token field")
+	}
+
+	if amount, ok := permitted["amount"].(string); ok {
+		payload.Permit2Authorization.Permitted.Amount = amount
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.permitted.amount field")
+	}
+
+	witness, ok := auth["witness"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.witness field")
+	}
+
+	if to, ok := witness["to"].(string); ok {
+		payload.Permit2Authorization.Witness.To = to
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.witness.to field")
+	}
+
+	if facilitator, ok := witness["facilitator"].(string); ok {
+		payload.Permit2Authorization.Witness.Facilitator = facilitator
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.witness.facilitator field")
+	}
+
+	if validAfter, ok := witness["validAfter"].(string); ok {
+		payload.Permit2Authorization.Witness.ValidAfter = validAfter
+	} else {
+		return nil, fmt.Errorf("missing or invalid permit2Authorization.witness.validAfter field")
+	}
+
+	return payload, nil
+}
+
+// IsUptoPermit2Payload checks if a payload map is an upto Permit2 payload.
+// Validates structural presence of all required fields including witness.facilitator.
+func IsUptoPermit2Payload(data map[string]interface{}) bool {
+	if _, ok := data["signature"].(string); !ok {
+		return false
+	}
+	auth, ok := data["permit2Authorization"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if _, ok := auth["from"].(string); !ok {
+		return false
+	}
+	if _, ok := auth["spender"].(string); !ok {
+		return false
+	}
+	witness, ok := auth["witness"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if _, ok := witness["facilitator"].(string); !ok {
+		return false
+	}
+	if _, ok := witness["to"].(string); !ok {
+		return false
+	}
+	if _, ok := witness["validAfter"].(string); !ok {
+		return false
+	}
+	return true
+}
+
 // ERC6492SignatureData represents the parsed components of an ERC-6492 signature
 // ERC-6492 allows signatures from undeployed smart contract accounts by wrapping
 // the signature with deployment information (factory address and calldata)
@@ -369,4 +533,8 @@ type ERC6492SignatureData struct {
 	Factory         [20]byte // CREATE2 factory address (zero address if not ERC-6492)
 	FactoryCalldata []byte   // Calldata to deploy the wallet (empty if not ERC-6492)
 	InnerSignature  []byte   // The actual signature (EIP-1271 or EOA)
+
+	// CodeDeployed reports whether the signer had bytecode, as determined by
+	// VerifyUniversalSignature. Zero value elsewhere.
+	CodeDeployed bool
 }

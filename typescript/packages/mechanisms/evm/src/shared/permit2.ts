@@ -15,22 +15,10 @@ import {
   type Erc20ApprovalGasSponsoringFacilitatorExtension,
   type Erc20ApprovalGasSponsoringSigner,
 } from "../exact/extensions";
-import { getAddress, encodeFunctionData } from "viem";
-import {
-  PERMIT2_ADDRESS,
-  eip3009ABI,
-  erc20AllowanceAbi,
-  ERC20_APPROVE_GAS_LIMIT,
-  DEFAULT_MAX_FEE_PER_GAS,
-  permit2WitnessTypes,
-} from "../constants";
-import {
-  multicall,
-  ContractCall,
-  MULTICALL3_ADDRESS,
-  multicall3GetEthBalanceAbi,
-} from "../multicall";
-import { createPermit2Nonce, getEvmChainId } from "../utils";
+import { getAddress, encodeFunctionData, parseErc6492Signature } from "viem";
+import { PERMIT2_ADDRESS, eip3009ABI, erc20AllowanceAbi, permit2WitnessTypes } from "../constants";
+import { multicall, ContractCall } from "../multicall";
+import { createPermit2Nonce, getEvmChainId, truncateErrorMessage } from "../utils";
 import {
   ErrPermit2612AmountMismatch,
   ErrPermit2InvalidAmount,
@@ -43,14 +31,13 @@ import {
   ErrPermit2SimulationFailed,
   ErrPermit2InsufficientBalance,
   ErrPermit2ProxyNotDeployed,
-  ErrInvalidTransactionState,
   ErrTransactionFailed,
   ErrInvalidEip2612ExtensionFormat,
   ErrEip2612FromMismatch,
   ErrEip2612AssetMismatch,
   ErrEip2612SpenderNotPermit2,
   ErrEip2612DeadlineExpired,
-  ErrErc20ApprovalInsufficientEthForGas,
+  ErrErc20ApprovalBroadcastFailed,
   ErrErc20ApprovalTxFailed,
 } from "../exact/facilitator/errors";
 import { ClientEvmSigner, FacilitatorEvmSigner } from "../signer";
@@ -171,41 +158,6 @@ export async function verifyPermit2Allowance(
 }
 
 /**
- * Waits for a transaction receipt and returns the appropriate SettleResponse.
- *
- * @param signer - Signer with waitForTransactionReceipt capability
- * @param tx - The transaction hash to wait for
- * @param payload - The payment payload (for network info)
- * @param payer - The payer address
- * @returns Promise resolving to a settlement response indicating success or failure
- */
-export async function waitAndReturnSettleResponse(
-  signer: Pick<FacilitatorEvmSigner, "waitForTransactionReceipt">,
-  tx: `0x${string}`,
-  payload: PaymentPayload,
-  payer: `0x${string}`,
-): Promise<SettleResponse> {
-  const receipt = await signer.waitForTransactionReceipt({ hash: tx });
-
-  if (receipt.status !== "success") {
-    return {
-      success: false,
-      errorReason: ErrInvalidTransactionState,
-      transaction: tx,
-      network: payload.accepted.network,
-      payer,
-    };
-  }
-
-  return {
-    success: true,
-    transaction: tx,
-    network: payload.accepted.network,
-    payer,
-  };
-}
-
-/**
  * Maps contract revert errors to structured SettleResponse error reasons.
  *
  * Inspects the error message for known contract revert strings and maps them
@@ -239,14 +191,14 @@ export function mapSettleError(
       errorReason = ErrPermit2InvalidSignature;
     } else if (message.includes("InvalidNonce")) {
       errorReason = ErrPermit2InvalidNonce;
-    } else if (message.includes("erc20_approval_tx_failed")) {
-      errorReason = ErrErc20ApprovalTxFailed;
+    } else if (message.includes(ErrErc20ApprovalTxFailed)) {
+      errorReason = ErrErc20ApprovalBroadcastFailed;
     } else if (message.includes("AmountExceedsPermitted")) {
       errorReason = ErrUptoAmountExceedsPermitted;
     } else if (message.includes("UnauthorizedFacilitator")) {
       errorReason = ErrUptoUnauthorizedFacilitator;
     } else {
-      errorReason = `${ErrTransactionFailed}: ${message.slice(0, 500)}`;
+      errorReason = `${ErrTransactionFailed}: ${truncateErrorMessage(message)}`;
     }
   }
   return {
@@ -506,18 +458,12 @@ export async function checkPermit2Prerequisites(
       functionName: "balanceOf",
       args: [payer],
     },
-    {
-      address: MULTICALL3_ADDRESS,
-      abi: multicall3GetEthBalanceAbi,
-      functionName: "getEthBalance",
-      args: [payer],
-    },
   ];
 
   try {
     const results = await multicall(signer.readContract.bind(signer), diagnosticCalls);
 
-    const [proxyResult, balanceResult, ethBalanceResult] = results;
+    const [proxyResult, balanceResult] = results;
 
     if (proxyResult.status === "failure") {
       return { isValid: false, invalidReason: ErrPermit2ProxyNotDeployed, payer };
@@ -527,18 +473,6 @@ export async function checkPermit2Prerequisites(
       const balance = balanceResult.result as bigint;
       if (balance < BigInt(amountRequired)) {
         return { isValid: false, invalidReason: ErrPermit2InsufficientBalance, payer };
-      }
-    }
-
-    if (ethBalanceResult.status === "success") {
-      const minEthForApprovalGas = ERC20_APPROVE_GAS_LIMIT * DEFAULT_MAX_FEE_PER_GAS;
-      const ethBalance = ethBalanceResult.result as bigint;
-      if (ethBalance < minEthForApprovalGas) {
-        return {
-          isValid: false,
-          invalidReason: ErrErc20ApprovalInsufficientEthForGas,
-          payer,
-        };
       }
     }
   } catch {
@@ -555,6 +489,8 @@ export async function checkPermit2Prerequisites(
  * @returns Tuple of contract call arguments for the exact settle function
  */
 export function buildExactPermit2SettleArgs(permit2Payload: Permit2PayloadBase) {
+  const { signature } = parseErc6492Signature(permit2Payload.signature);
+
   return [
     {
       permitted: {
@@ -569,7 +505,7 @@ export function buildExactPermit2SettleArgs(permit2Payload: Permit2PayloadBase) 
       to: getAddress(permit2Payload.permit2Authorization.witness.to),
       validAfter: BigInt(permit2Payload.permit2Authorization.witness.validAfter),
     },
-    permit2Payload.signature,
+    signature,
   ] as const;
 }
 
@@ -588,6 +524,8 @@ export function buildUptoPermit2SettleArgs(
   settlementAmount: bigint,
   facilitatorAddress: `0x${string}`,
 ) {
+  const { signature } = parseErc6492Signature(permit2Payload.signature);
+
   return [
     {
       permitted: {
@@ -604,7 +542,7 @@ export function buildUptoPermit2SettleArgs(
       facilitator: getAddress(facilitatorAddress),
       validAfter: BigInt(permit2Payload.permit2Authorization.witness.validAfter),
     },
-    permit2Payload.signature,
+    signature,
   ] as const;
 }
 
@@ -659,7 +597,7 @@ export async function createPermit2PayloadForProxy(
   const nonce = createPermit2Nonce();
 
   // Lower time bound - allow some clock skew
-  const validAfter = (now - 600).toString();
+  const validAfter = "0";
   // Upper time bound is enforced by Permit2's deadline field
   const deadline = (now + paymentRequirements.maxTimeoutSeconds).toString();
 

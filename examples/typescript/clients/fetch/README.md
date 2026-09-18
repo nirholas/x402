@@ -4,15 +4,22 @@ Example client demonstrating how to use `@x402/fetch` to make HTTP requests to e
 
 ```typescript
 import { x402Client, wrapFetchWithPayment } from "@x402/fetch";
-import { registerExactEvmScheme } from "@x402/evm/exact/client";
-import { registerExactSvmScheme } from "@x402/svm/exact/client";
+import { AuthCaptureEvmScheme } from "@x402/evm/auth-capture/client";
+import { ExactEvmScheme } from "@x402/evm/exact/client";
+import { UptoEvmScheme } from "@x402/evm/upto/client";
+import { ExactSvmScheme } from "@x402/svm/exact/client";
 import { privateKeyToAccount } from "viem/accounts";
 import { createKeyPairSignerFromBytes } from "@solana/kit";
 import { base58 } from "@scure/base";
 
-const client = new x402Client();
-registerExactEvmScheme(client, { signer: privateKeyToAccount(process.env.EVM_PRIVATE_KEY) });
-registerExactSvmScheme(client, { signer: (await createKeyPairSignerFromBytes(base58.decode(process.env.SVM_PRIVATE_KEY))) });
+const client = new x402Client()
+  .register("eip155:*", new ExactEvmScheme(privateKeyToAccount(process.env.EVM_PRIVATE_KEY)))
+  .register("eip155:*", new UptoEvmScheme(privateKeyToAccount(process.env.EVM_PRIVATE_KEY)))
+  .register("eip155:*", new AuthCaptureEvmScheme(privateKeyToAccount(process.env.EVM_PRIVATE_KEY)))
+  .register("solana:*", new ExactSvmScheme(await createKeyPairSignerFromBytes(base58.decode(process.env.SVM_PRIVATE_KEY))))
+  .setSpendControls({
+    maxAmountPerPayment: "$1",
+  });
 
 const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 
@@ -48,6 +55,10 @@ Required environment variables:
 - `EVM_PRIVATE_KEY` - Ethereum private key for EVM payments
 - `SVM_PRIVATE_KEY` - Solana private key for SVM payments
 
+Optional environment variables:
+
+- `EVM_RPC_URL` - JSON-RPC endpoint for on-chain reads. Enables gas sponsoring extensions (EIP-2612 and ERC-20 approval). Example: `https://sepolia.base.org`
+
 3. Run the client:
 
 ```bash
@@ -56,4 +67,4 @@ pnpm start
 
 ## Next Steps
 
-See [Advanced Examples](../advanced/) for builder pattern registration, payment lifecycle hooks, and network preferences.
+See [Advanced Examples](../advanced/) for builder pattern registration, payment lifecycle hooks, network preferences, and spend controls.

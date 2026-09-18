@@ -12,22 +12,11 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	x402 "github.com/coinbase/x402/go"
-	"github.com/coinbase/x402/go/extensions/bazaar"
-	"github.com/coinbase/x402/go/extensions/eip2612gassponsor"
-	"github.com/coinbase/x402/go/extensions/erc20approvalgassponsor"
-	exttypes "github.com/coinbase/x402/go/extensions/types"
-	evmmech "github.com/coinbase/x402/go/mechanisms/evm"
-	evm "github.com/coinbase/x402/go/mechanisms/evm/exact/facilitator"
-	evmv1 "github.com/coinbase/x402/go/mechanisms/evm/exact/v1/facilitator"
-	svmmech "github.com/coinbase/x402/go/mechanisms/svm"
-	svm "github.com/coinbase/x402/go/mechanisms/svm/exact/facilitator"
-	svmv1 "github.com/coinbase/x402/go/mechanisms/svm/exact/v1/facilitator"
-	x402types "github.com/coinbase/x402/go/types"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -40,12 +29,23 @@ import (
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gin-gonic/gin"
+	x402 "github.com/x402-foundation/x402/go/v2"
+	"github.com/x402-foundation/x402/go/v2/extensions/bazaar"
+	"github.com/x402-foundation/x402/go/v2/extensions/eip2612gassponsor"
+	"github.com/x402-foundation/x402/go/v2/extensions/erc20approvalgassponsor"
+	exttypes "github.com/x402-foundation/x402/go/v2/extensions/types"
+	evmmech "github.com/x402-foundation/x402/go/v2/mechanisms/evm"
+	"github.com/x402-foundation/x402/go/v2/mechanisms/evm/batch-settlement"
+	batchedevm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/batch-settlement/facilitator"
+	exactevm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/facilitator"
+	exactevmv1 "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/v1/facilitator"
+	uptoevm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/upto/facilitator"
+	svmmech "github.com/x402-foundation/x402/go/v2/mechanisms/svm"
+	svm "github.com/x402-foundation/x402/go/v2/mechanisms/svm/exact/facilitator"
+	svmv1 "github.com/x402-foundation/x402/go/v2/mechanisms/svm/exact/v1/facilitator"
+	uptosvm "github.com/x402-foundation/x402/go/v2/mechanisms/svm/upto/facilitator"
+	x402types "github.com/x402-foundation/x402/go/v2/types"
 )
-
-// NOTE: Facilitator signer helpers (go/signers/evm and go/signers/svm) are not yet implemented.
-// When available, this will reduce 300+ lines of facilitator signer code to just a few lines.
-// For now, facilitator signers still require manual implementation.
-// See PROPOSAL_SIGNER_HELPERS.md for the planned facilitator signer helpers.
 
 const (
 	DefaultPort = "4022"
@@ -70,6 +70,9 @@ type realFacilitatorEvmSigner struct {
 	address    common.Address
 	client     *ethclient.Client
 	chainID    *big.Int
+	nonceMu    sync.Mutex
+	nextNonce  uint64
+	nonceInit  bool
 }
 
 func newRealFacilitatorEvmSigner(privateKeyHex string, rpcURL string) (*realFacilitatorEvmSigner, error) {
@@ -112,6 +115,26 @@ func (s *realFacilitatorEvmSigner) GetChainID(ctx context.Context) (*big.Int, er
 	return s.chainID, nil
 }
 
+func (s *realFacilitatorEvmSigner) reserveNonce(ctx context.Context) (uint64, error) {
+	s.nonceMu.Lock()
+	defer s.nonceMu.Unlock()
+
+	// Sync with chain so txs from outside this process (e.g. e2e harness
+	// fundClientForRevoke) are reflected before we reserve the next nonce.
+	pending, err := s.client.PendingNonceAt(ctx, s.address)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get nonce: %w", err)
+	}
+	if !s.nonceInit || pending > s.nextNonce {
+		s.nextNonce = pending
+		s.nonceInit = true
+	}
+
+	nonce := s.nextNonce
+	s.nextNonce++
+	return nonce, nil
+}
+
 func (s *realFacilitatorEvmSigner) VerifyTypedData(
 	ctx context.Context,
 	address string,
@@ -147,14 +170,30 @@ func (s *realFacilitatorEvmSigner) VerifyTypedData(
 		typedData.Types[typeName] = typedFields
 	}
 
-	// Add EIP712Domain if not present
+	// Add EIP712Domain type if not present.
+	//
+	// Domain fields are conditionally declared based on which TypedDataDomain
+	// fields are populated. go-ethereum's `apitypes.TypedDataDomain.Map()`
+	// drops empty Name/Version/VerifyingContract and nil ChainID; if the type
+	// list still names them, `HashStruct("EIP712Domain", ...)` errors with
+	// "provided data '<nil>' doesn't match type 'string'" (Permit2's no-version
+	// domain is the canonical case). Mirrors viem's `getTypesForEIP712Domain`
+	// and the same fix applied to `go/mechanisms/evm/eip712.go`.
 	if _, exists := typedData.Types["EIP712Domain"]; !exists {
-		typedData.Types["EIP712Domain"] = []apitypes.Type{
-			{Name: "name", Type: "string"},
-			{Name: "version", Type: "string"},
-			{Name: "chainId", Type: "uint256"},
-			{Name: "verifyingContract", Type: "address"},
+		domainFields := make([]apitypes.Type, 0, 4)
+		if typedData.Domain.Name != "" {
+			domainFields = append(domainFields, apitypes.Type{Name: "name", Type: "string"})
 		}
+		if typedData.Domain.Version != "" {
+			domainFields = append(domainFields, apitypes.Type{Name: "version", Type: "string"})
+		}
+		if typedData.Domain.ChainId != nil {
+			domainFields = append(domainFields, apitypes.Type{Name: "chainId", Type: "uint256"})
+		}
+		if typedData.Domain.VerifyingContract != "" {
+			domainFields = append(domainFields, apitypes.Type{Name: "verifyingContract", Type: "address"})
+		}
+		typedData.Types["EIP712Domain"] = domainFields
 	}
 
 	// Hash the data
@@ -223,9 +262,11 @@ func (s *realFacilitatorEvmSigner) ReadContract(
 		return nil, fmt.Errorf("failed to pack method call: %w", err)
 	}
 
-	// Make the call
+	// Set From to the facilitator address — required by the upto proxy which enforces
+	// msg.sender == witness.facilitator in settle().
 	to := common.HexToAddress(contractAddress)
 	msg := ethereum.CallMsg{
+		From: s.address,
 		To:   &to,
 		Data: data,
 	}
@@ -258,6 +299,7 @@ func (s *realFacilitatorEvmSigner) WriteContract(
 	contractAddress string,
 	abiJSON []byte,
 	method string,
+	dataSuffix []byte,
 	args ...interface{},
 ) (string, error) {
 	// Parse ABI
@@ -271,11 +313,12 @@ func (s *realFacilitatorEvmSigner) WriteContract(
 	if err != nil {
 		return "", fmt.Errorf("failed to pack method call: %w", err)
 	}
+	data = evmmech.AppendDataSuffix(data, dataSuffix)
 
 	// Get nonce
-	nonce, err := s.client.PendingNonceAt(ctx, s.address)
+	nonce, err := s.reserveNonce(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to get nonce: %w", err)
+		return "", err
 	}
 
 	// Get gas price
@@ -316,9 +359,9 @@ func (s *realFacilitatorEvmSigner) SendTransaction(
 	data []byte,
 ) (string, error) {
 	// Get nonce
-	nonce, err := s.client.PendingNonceAt(ctx, s.address)
+	nonce, err := s.reserveNonce(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to get nonce: %w", err)
+		return "", err
 	}
 
 	// Get gas price
@@ -408,22 +451,73 @@ func (s *realFacilitatorEvmSigner) GetCode(ctx context.Context, address string) 
 	return code, nil
 }
 
-func (s *realFacilitatorEvmSigner) sendRawTransaction(ctx context.Context, signedTx string) (string, error) {
-	txBytes, err := hexutil.Decode(signedTx)
+func (s *realFacilitatorEvmSigner) decodeRawTransaction(serialized string) (*types.Transaction, error) {
+	txBytes, err := hexutil.Decode(serialized)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode signed transaction: %w", err)
+		return nil, fmt.Errorf("failed to decode signed transaction: %w", err)
 	}
-
 	tx := new(types.Transaction)
 	if err := tx.UnmarshalBinary(txBytes); err != nil {
-		return "", fmt.Errorf("failed to unmarshal transaction: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal transaction: %w", err)
 	}
+	return tx, nil
+}
 
+func (s *realFacilitatorEvmSigner) sendRawTransaction(ctx context.Context, tx *types.Transaction) (string, error) {
 	if err := s.client.SendTransaction(ctx, tx); err != nil {
 		return "", fmt.Errorf("failed to send raw transaction: %w", err)
 	}
-
 	return tx.Hash().Hex(), nil
+}
+
+func (s *realFacilitatorEvmSigner) fundPayerGasIfNeeded(ctx context.Context, decodedTx *types.Transaction) error {
+	chainSigner := types.LatestSignerForChainID(s.chainID)
+	payerAddr, err := types.Sender(chainSigner, decodedTx)
+	if err != nil {
+		return fmt.Errorf("failed to recover sender: %w", err)
+	}
+
+	gasFeeCap := decodedTx.GasFeeCap()
+	if gasFeeCap == nil {
+		gasFeeCap = decodedTx.GasPrice()
+	}
+	gasCost := new(big.Int).Mul(new(big.Int).SetUint64(decodedTx.Gas()), gasFeeCap)
+
+	payerBalance, err := s.client.BalanceAt(ctx, payerAddr, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get payer balance: %w", err)
+	}
+	if payerBalance.Cmp(gasCost) >= 0 {
+		return nil
+	}
+
+	deficit := new(big.Int).Sub(gasCost, payerBalance)
+	log.Printf("⛽ Funding payer %s with %s wei for gas", payerAddr.Hex(), deficit.String())
+
+	fundNonce, err := s.reserveNonce(ctx)
+	if err != nil {
+		return err
+	}
+	fundGasPrice, err := s.client.SuggestGasPrice(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get gas price: %w", err)
+	}
+
+	fundTx := types.NewTransaction(fundNonce, payerAddr, deficit, 21000, fundGasPrice, nil)
+	signedFundTx, err := types.SignTx(fundTx, chainSigner, s.privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to sign funding tx: %w", err)
+	}
+	if err := s.client.SendTransaction(ctx, signedFundTx); err != nil {
+		return fmt.Errorf("failed to send funding tx: %w", err)
+	}
+
+	fundReceipt, err := s.WaitForTransactionReceipt(ctx, signedFundTx.Hash().Hex())
+	if err != nil || fundReceipt.Status != evmmech.TxStatusSuccess {
+		return fmt.Errorf("gas funding failed: %s", signedFundTx.Hash().Hex())
+	}
+	log.Printf("⛽ Gas funding confirmed: %s", signedFundTx.Hash().Hex())
+	return nil
 }
 
 func (s *realFacilitatorEvmSigner) SendTransactions(ctx context.Context, transactions []erc20approvalgassponsor.TransactionRequest) ([]string, error) {
@@ -432,9 +526,16 @@ func (s *realFacilitatorEvmSigner) SendTransactions(ctx context.Context, transac
 		var hash string
 		var err error
 		if tx.Serialized != "" {
-			hash, err = s.sendRawTransaction(ctx, tx.Serialized)
+			decodedTx, decErr := s.decodeRawTransaction(tx.Serialized)
+			if decErr != nil {
+				return hashes, fmt.Errorf("transaction_failed: %w", decErr)
+			}
+			if fundErr := s.fundPayerGasIfNeeded(ctx, decodedTx); fundErr != nil {
+				return hashes, fmt.Errorf("transaction_failed: %w", fundErr)
+			}
+			hash, err = s.sendRawTransaction(ctx, decodedTx)
 		} else if tx.Call != nil {
-			hash, err = s.WriteContract(ctx, tx.Call.Address, tx.Call.ABI, tx.Call.Function, tx.Call.Args...)
+			hash, err = s.WriteContract(ctx, tx.Call.Address, tx.Call.ABI, tx.Call.Function, tx.Call.DataSuffix, tx.Call.Args...)
 		} else {
 			return hashes, fmt.Errorf("transaction_failed: empty transaction request")
 		}
@@ -497,6 +598,34 @@ func createPaymentHash(paymentPayload x402.PaymentPayload) string {
 func hashBytes(data []byte) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
+}
+
+// isBatchSettlementRequirements reports whether the payment requirements use
+// the batch-settlement scheme. Used by the verify-hash cache hooks to exempt
+// batch-settlement flows: the resource server rewrites refund and voucher
+// payloads between /verify and /settle, so the verify-time payload hash never
+// matches the settle-time hash for those flows. Mirrors the TS e2e facilitator.
+func isBatchSettlementRequirements(req x402.PaymentRequirementsView) bool {
+	if req == nil {
+		return false
+	}
+	return req.GetScheme() == batchsettlement.SchemeBatched
+}
+
+// skipsVerifyBeforeSettle reports whether the verified-payment cache check has
+// to be bypassed for these requirements. Escrow and upfront flows settle without
+// a prior /verify, and batch-settlement rewrites the payload between verify and
+// settle, so in both cases the cache lookup would never hit. Mirrors the TS e2e
+// facilitator (e2e/facilitators/typescript/index.ts).
+func skipsVerifyBeforeSettle(req x402.PaymentRequirementsView) bool {
+	if isBatchSettlementRequirements(req) {
+		return true
+	}
+	if req == nil {
+		return false
+	}
+	flow, _ := req.GetExtra()["paymentFlow"].(string)
+	return flow == string(x402.PaymentFlowEscrow) || flow == string(x402.PaymentFlowUpfront)
 }
 
 // Real SVM facilitator signer
@@ -577,7 +706,7 @@ func (s *realFacilitatorSvmSigner) SimulateTransaction(ctx context.Context, tx *
 	}
 
 	opts := rpc.SimulateTransactionOpts{
-		SigVerify:              true,
+		SigVerify:              false,
 		ReplaceRecentBlockhash: false,
 		Commitment:             svmmech.DefaultCommitment,
 	}
@@ -656,14 +785,182 @@ func (s *realFacilitatorSvmSigner) ConfirmTransaction(ctx context.Context, signa
 		}
 
 		// Wait before retrying
-		time.Sleep(svmmech.ConfirmRetryDelay)
+		delay := svmmech.ConfirmRetryDelay
+		if attempt < svmmech.ConfirmInitialAttempts {
+			delay = svmmech.ConfirmInitialRetryDelay
+		}
+		time.Sleep(delay)
 	}
 
 	return fmt.Errorf("transaction confirmation timed out after %d attempts", svmmech.MaxConfirmAttempts)
 }
 
+func (s *realFacilitatorSvmSigner) GetAccountInfo(
+	ctx context.Context,
+	account solana.PublicKey,
+	network string,
+	opts *rpc.GetAccountInfoOpts,
+) (*rpc.GetAccountInfoResult, error) {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return nil, err
+	}
+	return rpcClient.GetAccountInfoWithOpts(ctx, account, opts)
+}
+
+func (s *realFacilitatorSvmSigner) GetLatestBlockhash(ctx context.Context, network string) (solana.Hash, uint64, error) {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return solana.Hash{}, 0, err
+	}
+	latest, err := rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return solana.Hash{}, 0, err
+	}
+	return latest.Value.Blockhash, latest.Value.LastValidBlockHeight, nil
+}
+
+func (s *realFacilitatorSvmSigner) GetSlot(ctx context.Context, network string, commitment rpc.CommitmentType) (uint64, error) {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return 0, err
+	}
+	return rpcClient.GetSlot(ctx, commitment)
+}
+
+func (s *realFacilitatorSvmSigner) SimulateTransactionWithOpts(
+	ctx context.Context,
+	tx *solana.Transaction,
+	network string,
+	opts *rpc.SimulateTransactionOpts,
+) error {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return err
+	}
+	result, err := rpcClient.SimulateTransactionWithOpts(ctx, tx, opts)
+	if err != nil {
+		return fmt.Errorf("simulation failed: %w", err)
+	}
+	if result != nil && result.Value != nil && result.Value.Err != nil {
+		return fmt.Errorf("simulation failed: transaction would fail on-chain")
+	}
+	return nil
+}
+
+func (s *realFacilitatorSvmSigner) GetProgramAccounts(
+	ctx context.Context,
+	network string,
+	programID solana.PublicKey,
+	opts *rpc.GetProgramAccountsOpts,
+) (rpc.GetProgramAccountsResult, error) {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return nil, err
+	}
+	return rpcClient.GetProgramAccountsWithOpts(ctx, programID, opts)
+}
+
+func (s *realFacilitatorSvmSigner) SimulateTransactionWithInnerInstructions(ctx context.Context, tx *solana.Transaction, network string) ([]rpc.InnerInstruction, error) {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return nil, err
+	}
+	return svmmech.SimulateWithInnerInstructions(ctx, rpcClient, tx)
+}
+
+func (s *realFacilitatorSvmSigner) GetConfirmedTransactionInnerInstructions(ctx context.Context, signature solana.Signature, network string) ([]rpc.InnerInstruction, solana.PublicKeySlice, error) {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return nil, nil, err
+	}
+	return svmmech.ConfirmedTransactionInnerInstructions(ctx, rpcClient, signature)
+}
+
+func (s *realFacilitatorSvmSigner) GetTokenAccountBalance(ctx context.Context, tokenAccount solana.PublicKey, network string) (uint64, bool, error) {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return 0, false, err
+	}
+	return svmmech.TokenAccountBalance(ctx, rpcClient, tokenAccount)
+}
+
+func (s *realFacilitatorSvmSigner) FetchAddressLookupTables(ctx context.Context, tables []solana.PublicKey, network string) (map[solana.PublicKey]solana.PublicKeySlice, error) {
+	rpcClient, err := s.getRPC(ctx, network)
+	if err != nil {
+		return nil, err
+	}
+	return svmmech.AddressLookupTables(ctx, rpcClient, tables)
+}
+
 func (s *realFacilitatorSvmSigner) GetAddresses(ctx context.Context, network string) []solana.PublicKey {
 	return []solana.PublicKey{s.privateKey.PublicKey()}
+}
+
+// catalogTestnetCaip2 reads testnet.caip2 from e2e/config/mechanisms_<id>.json.
+func catalogTestnetCaip2(networkID string) (string, error) {
+	candidates := []string{}
+	if injected := os.Getenv("E2E_MECHANISMS_CATALOG"); injected != "" {
+		candidates = append(candidates, injected)
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		candidates = append(candidates, filepath.Join(dir, "config"))
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	for _, catalogDir := range candidates {
+		path := filepath.Join(catalogDir, fmt.Sprintf("mechanisms_%s.json", networkID))
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
+		}
+		var file struct {
+			Testnet struct {
+				Caip2 string `json:"caip2"`
+			} `json:"testnet"`
+		}
+		if err := json.Unmarshal(raw, &file); err != nil {
+			return "", fmt.Errorf("%s: %w", path, err)
+		}
+		if file.Testnet.Caip2 == "" {
+			return "", fmt.Errorf("%s: missing testnet.caip2", path)
+		}
+		return file.Testnet.Caip2, nil
+	}
+	return "", fmt.Errorf("could not locate mechanisms_%s.json", networkID)
+}
+
+// resolveNetworkCaip2 prefers `${ID}_NETWORK`, else catalog testnet CAIP-2.
+func resolveNetworkCaip2(networkID string) string {
+	if fromEnv := os.Getenv(strings.ToUpper(networkID) + "_NETWORK"); fromEnv != "" {
+		return fromEnv
+	}
+	caip2, err := catalogTestnetCaip2(networkID)
+	if err != nil {
+		log.Fatalf("❌ %v", err)
+	}
+	return caip2
+}
+
+// caip2Pattern derives a CAIP-2 namespace wildcard (eip155:*) from a concrete CAIP-2 id.
+func caip2Pattern(caip2 string) string {
+	ns, _, ok := strings.Cut(caip2, ":")
+	if !ok || ns == "" {
+		log.Fatalf("❌ invalid caip2: %s", caip2)
+	}
+	return ns + ":*"
+}
+
+// networkCaip2Pattern is the client/resource-server registration pattern for a catalog network.
+func networkCaip2Pattern(networkID string) string {
+	return caip2Pattern(resolveNetworkCaip2(networkID))
 }
 
 // Network configuration helpers
@@ -729,86 +1026,86 @@ func main() {
 		port = DefaultPort
 	}
 
-	// Network configuration from environment
-	evmNetwork := os.Getenv("EVM_NETWORK")
-	if evmNetwork == "" {
-		evmNetwork = "eip155:84532" // Default: Base Sepolia
-	}
-	svmNetwork := os.Getenv("SVM_NETWORK")
-	if svmNetwork == "" {
-		svmNetwork = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" // Default: Solana Devnet
-	}
+	// Network configuration — harness-injected `${ID}_NETWORK` or catalog testnet
+	evmNetwork := resolveNetworkCaip2("evm")
+	svmNetwork := resolveNetworkCaip2("svm")
 
-	log.Printf("🌐 EVM Network: %s", evmNetwork)
-	log.Printf("🌐 SVM Network: %s", svmNetwork)
-
-	evmPrivateKey := os.Getenv("EVM_PRIVATE_KEY")
-	if evmPrivateKey == "" {
-		log.Fatal("❌ EVM_PRIVATE_KEY environment variable is required")
+	evmPrivateKey := os.Getenv("FACILITATOR_EVM_PRIVATE_KEY")
+	svmPrivateKey := os.Getenv("FACILITATOR_SVM_PRIVATE_KEY")
+	if evmPrivateKey == "" && svmPrivateKey == "" {
+		log.Fatal("❌ At least one of FACILITATOR_EVM_PRIVATE_KEY or FACILITATOR_SVM_PRIVATE_KEY is required")
 	}
 
-	svmPrivateKey := os.Getenv("SVM_PRIVATE_KEY")
-	if svmPrivateKey == "" {
-		log.Fatal("❌ SVM_PRIVATE_KEY environment variable is required")
-	}
-
-	// Initialize the real EVM blockchain signer with dynamic RPC URL
-	evmRpcUrl := getEvmRpcUrl(evmNetwork)
-	log.Printf("🌐 EVM RPC URL: %s", evmRpcUrl)
-	evmSigner, err := newRealFacilitatorEvmSigner(evmPrivateKey, evmRpcUrl)
-	if err != nil {
-		log.Fatalf("Failed to create EVM signer: %v", err)
-	}
-
-	chainID, _ := evmSigner.GetChainID(context.Background())
-	addresses := evmSigner.GetAddresses()
-	log.Printf("EVM Facilitator account: %s", addresses[0])
-	log.Printf("Connected to chain ID: %s", chainID.String())
-
-	// Initialize the real SVM blockchain signer with dynamic RPC URL
-	svmRpcUrl := getSvmRpcUrl(svmNetwork)
-	log.Printf("🌐 SVM RPC URL: %s", svmRpcUrl)
-	svmSigner, err := newRealFacilitatorSvmSigner(svmPrivateKey, svmRpcUrl)
-	if err != nil {
-		log.Fatalf("Failed to create SVM signer: %v", err)
-	}
-
-	svmAddresses := svmSigner.GetAddresses(context.Background(), svmNetwork)
-	log.Printf("SVM Facilitator account: %s", svmAddresses[0].String())
-
-	// Initialize the x402 Facilitator with EVM and SVM support
 	facilitator := x402.Newx402Facilitator()
+	var evmSigner *realFacilitatorEvmSigner
 
-	// Register EVM schemes with dynamic network
-	// Enable smart wallet deployment via EIP-6492
-	evmConfig := &evm.ExactEvmSchemeConfig{
-		DeployERC4337WithEIP6492: true,
+	if evmPrivateKey != "" {
+		log.Printf("🌐 EVM Network: %s", evmNetwork)
+		evmRpcUrl := getEvmRpcUrl(evmNetwork)
+		log.Printf("🌐 EVM RPC URL: %s", evmRpcUrl)
+		var err error
+		evmSigner, err = newRealFacilitatorEvmSigner(evmPrivateKey, evmRpcUrl)
+		if err != nil {
+			log.Fatalf("Failed to create EVM signer: %v", err)
+		}
+
+		chainID, _ := evmSigner.GetChainID(context.Background())
+		addresses := evmSigner.GetAddresses()
+		log.Printf("EVM Facilitator account: %s", addresses[0])
+		log.Printf("Connected to chain ID: %s", chainID.String())
+
+		evmConfig := &exactevm.ExactEvmSchemeConfig{}
+		facilitator.Register([]x402.Network{x402.Network(evmNetwork)}, exactevm.NewExactEvmScheme(evmSigner, evmConfig))
+		facilitator.Register([]x402.Network{x402.Network(evmNetwork)}, uptoevm.NewUptoEvmScheme(evmSigner, nil))
+
+		batchedAuthorizer, err := newBatchedAuthorizerSigner(evmPrivateKey)
+		if err != nil {
+			log.Fatalf("Failed to create batch-settlement authorizer: %v", err)
+		}
+		log.Printf("EVM Receiver Authorizer (batch-settlement): %s", batchedAuthorizer.Address())
+		facilitator.Register(
+			[]x402.Network{x402.Network(evmNetwork)},
+			batchedevm.NewBatchSettlementEvmScheme(evmSigner, batchedAuthorizer),
+		)
+
+		evmV1Config := &exactevmv1.ExactEvmSchemeV1Config{}
+		facilitator.RegisterV1(
+			[]x402.Network{x402.Network(getV1EvmNetwork(evmNetwork))},
+			exactevmv1.NewExactEvmSchemeV1(evmSigner, evmV1Config),
+		)
+
+		facilitator.RegisterExtension(eip2612gassponsor.EIP2612GasSponsoring)
+		facilitator.RegisterExtension(&erc20approvalgassponsor.Erc20ApprovalFacilitatorExtension{Signer: evmSigner})
 	}
-	evmFacilitatorScheme := evm.NewExactEvmScheme(evmSigner, evmConfig)
-	facilitator.Register([]x402.Network{x402.Network(evmNetwork)}, evmFacilitatorScheme)
 
-	evmV1Config := &evmv1.ExactEvmSchemeV1Config{
-		DeployERC4337WithEIP6492: true,
+	if svmPrivateKey != "" {
+		log.Printf("🌐 SVM Network: %s", svmNetwork)
+		svmRpcUrl := getSvmRpcUrl(svmNetwork)
+		log.Printf("🌐 SVM RPC URL: %s", svmRpcUrl)
+		svmSigner, err := newRealFacilitatorSvmSigner(svmPrivateKey, svmRpcUrl)
+		if err != nil {
+			log.Fatalf("Failed to create SVM signer: %v", err)
+		}
+
+		svmAddresses := svmSigner.GetAddresses(context.Background(), svmNetwork)
+		log.Printf("SVM Facilitator account: %s", svmAddresses[0].String())
+
+		facilitator.Register(
+			[]x402.Network{x402.Network(svmNetwork)},
+			svm.NewExactSvmScheme(svmSigner, &svm.Config{EnableSmartWalletVerification: true}),
+		)
+		facilitator.Register(
+			[]x402.Network{x402.Network(svmNetwork)},
+			uptosvm.NewUptoSvmScheme(svmSigner, nil),
+		)
+		facilitator.RegisterV1(
+			[]x402.Network{x402.Network(getV1SvmNetwork(svmNetwork))},
+			svmv1.NewExactSvmSchemeV1(svmSigner),
+		)
 	}
-	evmFacilitatorV1Scheme := evmv1.NewExactEvmSchemeV1(evmSigner, evmV1Config)
-	facilitator.RegisterV1([]x402.Network{x402.Network(getV1EvmNetwork(evmNetwork))}, evmFacilitatorV1Scheme)
-
-	// Register SVM schemes with dynamic network
-	svmFacilitatorScheme := svm.NewExactSvmScheme(svmSigner)
-	facilitator.Register([]x402.Network{x402.Network(svmNetwork)}, svmFacilitatorScheme)
-
-	svmFacilitatorV1Scheme := svmv1.NewExactSvmSchemeV1(svmSigner)
-	facilitator.RegisterV1([]x402.Network{x402.Network(getV1SvmNetwork(svmNetwork))}, svmFacilitatorV1Scheme)
 
 	// Register the Bazaar discovery extension
 	facilitator.RegisterExtension(exttypes.BAZAAR)
-
-	// Register the EIP-2612 Gas Sponsoring extension
-	facilitator.RegisterExtension(eip2612gassponsor.EIP2612GasSponsoring)
-
-	// Register the ERC-20 Approval Gas Sponsoring extension
-	erc20Ext := &erc20approvalgassponsor.Erc20ApprovalFacilitatorExtension{Signer: evmSigner}
-	facilitator.RegisterExtension(erc20Ext)
 
 	// Lifecycle hooks for payment tracking and discovery
 	facilitator.
@@ -832,20 +1129,34 @@ func main() {
 					log.Printf("Warning: Failed to extract discovery info: %v", err)
 				} else if discovered != nil {
 					log.Printf("📝 Cataloging discovered resource: %s %s", discovered.Method, discovered.ResourceURL)
+					if discovered.ServiceName != "" {
+						log.Printf("   Service: %s", discovered.ServiceName)
+					}
+					if len(discovered.Tags) > 0 {
+						log.Printf("   Tags: %s", strings.Join(discovered.Tags, ", "))
+					}
 
 					// Unmarshal requirements for cataloging based on version
 					version := ctx.Payload.GetVersion()
 					if version == 2 {
 						var requirements x402.PaymentRequirements
 						if err := json.Unmarshal(ctx.RequirementsBytes, &requirements); err == nil {
-							bazaarCatalog.CatalogResource(
-								discovered.ResourceURL,
-								discovered.Method,
-								version,
-								discovered.DiscoveryInfo,
-								requirements,
-								discovered.RouteTemplate,
-							)
+							reqJSON, marshalErr := json.Marshal(requirements)
+							if marshalErr == nil {
+								bazaarCatalog.Add(bazaar.DiscoveryResource{
+									Resource:    discovered.ResourceURL,
+									Type:        discovered.InputType(),
+									X402Version: version,
+									Accepts:     []json.RawMessage{reqJSON},
+									LastUpdated: time.Now().UTC().Format(time.RFC3339),
+									Description: discovered.Description,
+									MimeType:    discovered.MimeType,
+									ServiceName: discovered.ServiceName,
+									Tags:        discovered.Tags,
+									IconUrl:     discovered.IconUrl,
+									Extensions:  discovered.Extensions,
+								})
+							}
 						}
 					} else if version == 1 {
 						var requirementsV1 x402types.PaymentRequirementsV1
@@ -860,14 +1171,22 @@ func main() {
 								PayTo:             requirementsV1.PayTo,
 								MaxTimeoutSeconds: requirementsV1.MaxTimeoutSeconds,
 							}
-							bazaarCatalog.CatalogResource(
-								discovered.ResourceURL,
-								discovered.Method,
-								version,
-								discovered.DiscoveryInfo,
-								requirements,
-								discovered.RouteTemplate,
-							)
+							reqJSON, marshalErr := json.Marshal(requirements)
+							if marshalErr == nil {
+								bazaarCatalog.Add(bazaar.DiscoveryResource{
+									Resource:    discovered.ResourceURL,
+									Type:        discovered.InputType(),
+									X402Version: version,
+									Accepts:     []json.RawMessage{reqJSON},
+									LastUpdated: time.Now().UTC().Format(time.RFC3339),
+									Description: discovered.Description,
+									MimeType:    discovered.MimeType,
+									ServiceName: discovered.ServiceName,
+									Tags:        discovered.Tags,
+									IconUrl:     discovered.IconUrl,
+									Extensions:  discovered.Extensions,
+								})
+							}
 						}
 					}
 				}
@@ -875,7 +1194,17 @@ func main() {
 			return nil
 		}).
 		OnBeforeSettle(func(ctx x402.FacilitatorSettleContext) (*x402.FacilitatorBeforeHookResult, error) {
-			// Hook 3: Validate payment was previously verified
+			// Hook 3: Validate payment was previously verified.
+			//
+			// Batch-settlement is exempt: the resource server's `BeforeSettleHook`
+			// rewrites refund payloads (adds claims/amount/refundNonce) and rewrites
+			// voucher commits before /settle, so the payload bytes seen at settle
+			// time differ from the verify-time bytes. Escrow and upfront flows are
+			// exempt because they settle without a prior /verify.
+			if skipsVerifyBeforeSettle(ctx.Requirements) {
+				return nil, nil
+			}
+
 			paymentHash := hashBytes(ctx.PayloadBytes)
 			verificationMutex.RLock()
 			verificationTimestamp, verified := verifiedPayments[paymentHash]
@@ -904,11 +1233,16 @@ func main() {
 			return nil, nil
 		}).
 		OnAfterSettle(func(ctx x402.FacilitatorSettleResultContext) error {
-			// Hook 4: Clean up verified payment tracking after successful settlement
-			paymentHash := hashBytes(ctx.PayloadBytes)
-			verificationMutex.Lock()
-			delete(verifiedPayments, paymentHash)
-			verificationMutex.Unlock()
+			// Hook 4: Clean up verified payment tracking after successful settlement.
+			// Skip cleanup for the flows exempted above: the verify-time entry was
+			// keyed by a different payload, or never written at all, so there is
+			// nothing to delete here and any stale entry ages out via the 5-min TTL.
+			if !skipsVerifyBeforeSettle(ctx.Requirements) {
+				paymentHash := hashBytes(ctx.PayloadBytes)
+				verificationMutex.Lock()
+				delete(verifiedPayments, paymentHash)
+				verificationMutex.Unlock()
+			}
 
 			if ctx.Result.Success {
 				log.Printf("✅ Settlement completed: %s", ctx.Result.Transaction)
@@ -916,11 +1250,14 @@ func main() {
 			return nil
 		}).
 		OnSettleFailure(func(ctx x402.FacilitatorSettleFailureContext) (*x402.FacilitatorSettleFailureHookResult, error) {
-			// Hook 5: Clean up verified payment tracking on failure too
-			paymentHash := hashBytes(ctx.PayloadBytes)
-			verificationMutex.Lock()
-			delete(verifiedPayments, paymentHash)
-			verificationMutex.Unlock()
+			// Hook 5: Clean up verified payment tracking on failure too. Same
+			// exemptions as OnAfterSettle.
+			if !skipsVerifyBeforeSettle(ctx.Requirements) {
+				paymentHash := hashBytes(ctx.PayloadBytes)
+				verificationMutex.Lock()
+				delete(verifiedPayments, paymentHash)
+				verificationMutex.Unlock()
+			}
 
 			log.Printf("❌ Settlement failed: %v", ctx.Error)
 			return nil, nil
@@ -1044,13 +1381,40 @@ func main() {
 		items, total := bazaarCatalog.GetResources(limit, offset)
 
 		c.JSON(http.StatusOK, gin.H{
-			"x402Version": 1,
+			"x402Version": 2,
 			"items":       items,
 			"pagination": gin.H{
 				"limit":  limit,
 				"offset": offset,
 				"total":  total,
 			},
+		})
+	})
+
+	// GET /discovery/search - Search discovered resources using keyword matching
+	router.GET("/discovery/search", func(c *gin.Context) {
+		query := c.Query("query")
+		if query == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "query parameter is required"})
+			return
+		}
+
+		resourceType := c.Query("type")
+		limit := 0
+		if limitParam := c.Query("limit"); limitParam != "" {
+			fmt.Sscanf(limitParam, "%d", &limit)
+		}
+
+		items, _ := bazaarCatalog.SearchResources(query, resourceType, limit)
+		if items == nil {
+			items = []bazaar.DiscoveryResource{}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"x402Version":    2,
+			"resources":      items,
+			"partialResults": false,
+			"pagination":     nil,
 		})
 	})
 
@@ -1081,6 +1445,18 @@ func main() {
 	})
 
 	// Start the server
+	evmAddr := "(not configured)"
+	if evmSigner != nil {
+		evmAddr = evmSigner.GetAddresses()[0]
+	}
+	svmLabel := "(not configured)"
+	if svmPrivateKey != "" {
+		svmLabel = svmNetwork
+	}
+	evmLabel := "(not configured)"
+	if evmPrivateKey != "" {
+		evmLabel = evmNetwork
+	}
 	fmt.Printf(`
 ╔════════════════════════════════════════════════════════╗
 ║              x402 Go Facilitator                       ║
@@ -1099,7 +1475,7 @@ func main() {
 ║  • GET  /health              (health check)           ║
 ║  • POST /close               (shutdown server)        ║
 ╚════════════════════════════════════════════════════════╝
-`, port, evmNetwork, svmNetwork, evmSigner.GetAddresses()[0])
+`, port, evmLabel, svmLabel, evmAddr)
 
 	// Log that facilitator is ready (needed for e2e test discovery)
 	log.Println("Facilitator listening")

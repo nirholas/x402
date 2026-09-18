@@ -4,12 +4,19 @@ Example client demonstrating how to use `@x402/axios` to make HTTP requests to e
 
 ```typescript
 import { x402Client, wrapAxiosWithPayment } from "@x402/axios";
-import { registerExactEvmScheme } from "@x402/evm/exact/client";
+import { AuthCaptureEvmScheme } from "@x402/evm/auth-capture/client";
+import { ExactEvmScheme } from "@x402/evm/exact/client";
+import { UptoEvmScheme } from "@x402/evm/upto/client";
 import { privateKeyToAccount } from "viem/accounts";
 import axios from "axios";
 
-const client = new x402Client();
-registerExactEvmScheme(client, { signer: privateKeyToAccount(process.env.EVM_PRIVATE_KEY) });
+const client = new x402Client()
+  .register("eip155:*", new ExactEvmScheme(privateKeyToAccount(process.env.EVM_PRIVATE_KEY)))
+  .register("eip155:*", new UptoEvmScheme(privateKeyToAccount(process.env.EVM_PRIVATE_KEY)))
+  .register("eip155:*", new AuthCaptureEvmScheme(privateKeyToAccount(process.env.EVM_PRIVATE_KEY)))
+  .setSpendControls({
+    maxAmountPerPayment: "$1",
+  });
 
 const api = wrapAxiosWithPayment(axios.create(), client);
 
@@ -45,6 +52,10 @@ Required environment variables:
 - `EVM_PRIVATE_KEY` - Ethereum private key for EVM payments
 - `SVM_PRIVATE_KEY` - Solana private key for SVM payments
 
+Optional environment variables:
+
+- `EVM_RPC_URL` - JSON-RPC endpoint for on-chain reads. Enables gas sponsoring extensions (EIP-2612 and ERC-20 approval). Example: `https://sepolia.base.org`
+
 3. Run the client:
 
 ```bash
@@ -53,4 +64,4 @@ pnpm start
 
 ## Next Steps
 
-See [Advanced Examples](../advanced/) for builder pattern registration, payment lifecycle hooks, and network preferences.
+See [Advanced Examples](../advanced/) for builder pattern registration, payment lifecycle hooks, network preferences, and spend controls.

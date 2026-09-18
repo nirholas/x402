@@ -8,14 +8,15 @@ import (
 	"os"
 	"time"
 
-	x402 "github.com/coinbase/x402/go"
-	evm "github.com/coinbase/x402/go/mechanisms/evm/exact/facilitator"
-	evmv1 "github.com/coinbase/x402/go/mechanisms/evm/exact/v1/facilitator"
-	svmmech "github.com/coinbase/x402/go/mechanisms/svm"
-	svm "github.com/coinbase/x402/go/mechanisms/svm/exact/facilitator"
-	svmv1 "github.com/coinbase/x402/go/mechanisms/svm/exact/v1/facilitator"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	x402 "github.com/x402-foundation/x402/go/v2"
+	evm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/facilitator"
+	evmv1 "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/v1/facilitator"
+	uptoevm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/upto/facilitator"
+	svmmech "github.com/x402-foundation/x402/go/v2/mechanisms/svm"
+	svm "github.com/x402-foundation/x402/go/v2/mechanisms/svm/exact/facilitator"
+	svmv1 "github.com/x402-foundation/x402/go/v2/mechanisms/svm/exact/v1/facilitator"
 )
 
 const (
@@ -48,22 +49,27 @@ func main() {
 	}
 
 	facilitator := x402.Newx402Facilitator()
-	
-	// Register V2 EVM scheme with smart wallet deployment enabled
+
+	// Register V2 EVM scheme with smart wallet deployment support
 	evmConfig := &evm.ExactEvmSchemeConfig{
-		DeployERC4337WithEIP6492: true,
+		// Add trusted ERC-6492 factory addresses here (e.g. your chosen ERC-4337 smart wallet factory).
+		// A non-empty slice enables smart wallet deployment; an empty slice denies all factory calls.
+		EIP6492AllowedFactories: []string{},
 	}
 	facilitator.Register([]x402.Network{evmNetwork}, evm.NewExactEvmScheme(evmSigner, evmConfig))
+	facilitator.Register([]x402.Network{evmNetwork}, uptoevm.NewUptoEvmScheme(evmSigner, nil))
 
-	// Register V1 EVM scheme with smart wallet deployment enabled
+	// Register V1 EVM scheme with smart wallet deployment support
 	evmV1Config := &evmv1.ExactEvmSchemeV1Config{
-		DeployERC4337WithEIP6492: true,
+		// Add trusted ERC-6492 factory addresses here (e.g. your chosen ERC-4337 smart wallet factory).
+		// A non-empty slice enables smart wallet deployment; an empty slice denies all factory calls.
+		EIP6492AllowedFactories: []string{},
 	}
 	facilitator.RegisterV1([]x402.Network{"base-sepolia"}, evmv1.NewExactEvmSchemeV1(evmSigner, evmV1Config))
 
 	if svmSigner != nil {
 		settlementCache := svmmech.NewSettlementCache()
-		facilitator.Register([]x402.Network{svmNetwork}, svm.NewExactSvmScheme(svmSigner, settlementCache))
+		facilitator.Register([]x402.Network{svmNetwork}, svm.NewExactSvmScheme(svmSigner, &svm.Config{SettlementCache: settlementCache}))
 		facilitator.RegisterV1([]x402.Network{"solana-devnet"}, svmv1.NewExactSvmSchemeV1(svmSigner, settlementCache))
 	}
 
@@ -90,6 +96,11 @@ func main() {
 
 	// Verify endpoint - verifies payment signatures
 	r.POST("/verify", func(c *gin.Context) {
+		endpointT0 := time.Now()
+		defer func() {
+			fmt.Printf("/verify completed in %.3fs\n", time.Since(endpointT0).Seconds())
+		}()
+
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 		defer cancel()
 
@@ -123,6 +134,11 @@ func main() {
 
 	// Settle endpoint - settles payments on-chain
 	r.POST("/settle", func(c *gin.Context) {
+		endpointT0 := time.Now()
+		defer func() {
+			fmt.Printf("/settle completed in %.3fs\n", time.Since(endpointT0).Seconds())
+		}()
+
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 		defer cancel()
 
@@ -166,4 +182,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-

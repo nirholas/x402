@@ -3,7 +3,7 @@ package unit_test
 import (
 	"testing"
 
-	evmv1 "github.com/coinbase/x402/go/mechanisms/evm/v1"
+	evmv1 "github.com/x402-foundation/x402/go/v2/mechanisms/evm/v1"
 )
 
 func TestV1GetEvmChainId(t *testing.T) {
@@ -50,52 +50,6 @@ func TestV1GetEvmChainId(t *testing.T) {
 	}
 }
 
-func TestV1GetNetworkConfig(t *testing.T) {
-	t.Run("base has default asset", func(t *testing.T) {
-		config, err := evmv1.GetNetworkConfig("base")
-		if err != nil {
-			t.Fatalf("Failed to get config: %v", err)
-		}
-
-		if config.ChainID.Int64() != 8453 {
-			t.Errorf("Expected chain ID 8453, got %d", config.ChainID.Int64())
-		}
-
-		if config.DefaultAsset.Address == "" {
-			t.Error("Expected default asset to be configured")
-		}
-
-		if config.DefaultAsset.Decimals != 6 {
-			t.Errorf("Expected 6 decimals, got %d", config.DefaultAsset.Decimals)
-		}
-	})
-
-	t.Run("base-sepolia has default asset", func(t *testing.T) {
-		config, err := evmv1.GetNetworkConfig("base-sepolia")
-		if err != nil {
-			t.Fatalf("Failed to get config: %v", err)
-		}
-
-		if config.ChainID.Int64() != 84532 {
-			t.Errorf("Expected chain ID 84532, got %d", config.ChainID.Int64())
-		}
-	})
-
-	t.Run("network without config returns error", func(t *testing.T) {
-		_, err := evmv1.GetNetworkConfig("polygon")
-		if err == nil {
-			t.Error("Expected error for network without configured default asset")
-		}
-	})
-
-	t.Run("CAIP-2 format rejected", func(t *testing.T) {
-		_, err := evmv1.GetNetworkConfig("eip155:8453")
-		if err == nil {
-			t.Error("Expected error for CAIP-2 format in v1")
-		}
-	})
-}
-
 func TestV1GetAssetInfo(t *testing.T) {
 	t.Run("explicit address returns info", func(t *testing.T) {
 		info, err := evmv1.GetAssetInfo("base", "0x1234567890123456789012345678901234567890")
@@ -123,8 +77,19 @@ func TestV1GetAssetInfo(t *testing.T) {
 		}
 	})
 
+	t.Run("polygon empty asset uses default USDC", func(t *testing.T) {
+		info, err := evmv1.GetAssetInfo("polygon", "")
+		if err != nil {
+			t.Fatalf("Failed to get asset info: %v", err)
+		}
+
+		if info.Address != "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" {
+			t.Errorf("Expected Polygon USDC address, got %s", info.Address)
+		}
+	})
+
 	t.Run("network without config fails for empty asset", func(t *testing.T) {
-		_, err := evmv1.GetAssetInfo("polygon", "")
+		_, err := evmv1.GetAssetInfo("iotex", "")
 		if err == nil {
 			t.Error("Expected error for network without default asset")
 		}

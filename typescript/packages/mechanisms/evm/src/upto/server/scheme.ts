@@ -1,13 +1,16 @@
 import {
   AssetAmount,
   Network,
+  PaymentFlowConfig,
   PaymentRequirements,
   Price,
   SchemeNetworkServer,
   MoneyParser,
 } from "@x402/core/types";
+import { convertToTokenAmount, parseMoney } from "@x402/core/utils";
 import { getAddress } from "viem";
-import { getDefaultAsset } from "../../shared/defaultAssets";
+import { findDefaultAsset, getDefaultAsset } from "../../defaultAssets";
+import type { AssetTransferMethod } from "../../types";
 
 /**
  * EVM server implementation for the Upto payment scheme.
@@ -15,6 +18,10 @@ import { getDefaultAsset } from "../../shared/defaultAssets";
  */
 export class UptoEvmScheme implements SchemeNetworkServer {
   readonly scheme = "upto";
+  readonly defaultAssetTransferMethod: AssetTransferMethod = "permit2";
+  readonly paymentFlows = {
+    permit2: { supported: ["authorization"], default: "authorization" },
+  } as const satisfies Record<"permit2", PaymentFlowConfig>;
   private moneyParsers: MoneyParser[] = [];
 
   /**
@@ -26,6 +33,17 @@ export class UptoEvmScheme implements SchemeNetworkServer {
   registerMoneyParser(parser: MoneyParser): UptoEvmScheme {
     this.moneyParsers.push(parser);
     return this;
+  }
+
+  /**
+   * Decimals for a known default asset, or undefined.
+   *
+   * @param asset - Asset address or symbol
+   * @param network - Target network
+   * @returns Decimals when the asset is a known default; otherwise undefined
+   */
+  getAssetDecimals(asset: string, network: Network): number | undefined {
+    return findDefaultAsset(asset, network)?.decimals;
   }
 
   /**
@@ -47,7 +65,7 @@ export class UptoEvmScheme implements SchemeNetworkServer {
       };
     }
 
-    const amount = this.parseMoneyToDecimal(price);
+    const { amount, symbol } = parseMoney(price);
 
     for (const parser of this.moneyParsers) {
       const result = await parser(amount, network);
@@ -56,7 +74,7 @@ export class UptoEvmScheme implements SchemeNetworkServer {
       }
     }
 
-    return this.defaultMoneyConversion(amount, network);
+    return this.defaultMoneyConversion(amount, network, symbol);
   }
 
   /**
@@ -95,63 +113,25 @@ export class UptoEvmScheme implements SchemeNetworkServer {
   }
 
   /**
-   * Parses a money string or number into a decimal value.
+   * Converts a decimal dollar amount to an AssetAmount using the default token for the network.
    *
-   * @param money - The money value to parse
-   * @returns The parsed decimal amount
-   */
-  private parseMoneyToDecimal(money: string | number): number {
-    if (typeof money === "number") {
-      return money;
-    }
-
-    const cleanMoney = money.replace(/^\$/, "").trim();
-    const amount = parseFloat(cleanMoney);
-
-    if (isNaN(amount)) {
-      throw new Error(`Invalid money format: ${money}`);
-    }
-
-    return amount;
-  }
-
-  /**
-   * Converts a numeric dollar amount to an AssetAmount using the default token for the network.
-   *
-   * @param amount - The dollar amount as a number
+   * @param amount - The decimal amount as a string
    * @param network - The target network
+   * @param symbol - Optional ticker from a suffixed price
    * @returns The converted asset amount with token metadata
    */
-  private defaultMoneyConversion(amount: number, network: Network): AssetAmount {
-    const assetInfo = getDefaultAsset(network);
-    const tokenAmount = this.convertToTokenAmount(amount.toString(), assetInfo.decimals);
+  private defaultMoneyConversion(amount: string, network: Network, symbol?: string): AssetAmount {
+    const assetInfo = getDefaultAsset(network, symbol);
+    const tokenAmount = convertToTokenAmount(amount, assetInfo.decimals);
 
     return {
       amount: tokenAmount,
-      asset: assetInfo.address,
+      asset: assetInfo.asset,
       extra: {
         name: assetInfo.name,
         version: assetInfo.version,
         assetTransferMethod: "permit2",
       },
     };
-  }
-
-  /**
-   * Converts a decimal string amount to an integer token amount using the given decimals.
-   *
-   * @param decimalAmount - The amount as a decimal string (e.g. "1.5")
-   * @param decimals - The number of decimal places for the token
-   * @returns The token amount as an integer string in smallest units
-   */
-  private convertToTokenAmount(decimalAmount: string, decimals: number): string {
-    const amount = parseFloat(decimalAmount);
-    if (isNaN(amount)) {
-      throw new Error(`Invalid amount: ${decimalAmount}`);
-    }
-    const [intPart, decPart = ""] = String(amount).split(".");
-    const paddedDec = decPart.padEnd(decimals, "0").slice(0, decimals);
-    const tokenAmount = (intPart + paddedDec).replace(/^0+/, "") || "0";
-    return tokenAmount;
   }
 }
