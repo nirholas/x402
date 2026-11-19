@@ -2,10 +2,14 @@ package client
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/crypto"
 
 	x402 "github.com/x402-foundation/x402/go/v2"
 	"github.com/x402-foundation/x402/go/v2/mechanisms/evm"
@@ -134,8 +138,8 @@ func TestNewBatchSettlementEvmScheme_Defaults(t *testing.T) {
 	if scheme.config.DepositMultiplier != DefaultDepositMultiplier {
 		t.Fatalf("multiplier = %d", scheme.config.DepositMultiplier)
 	}
-	if scheme.config.Salt != DefaultSalt {
-		t.Fatalf("salt = %s", scheme.config.Salt)
+	if scheme.config.Salt != "" {
+		t.Fatalf("salt should default to empty, got %q", scheme.config.Salt)
 	}
 	if scheme.config.DepositStrategy != nil {
 		t.Fatal("DepositStrategy should be nil by default")
@@ -166,7 +170,7 @@ func TestNewBatchSettlementEvmScheme_OverridesConfig(t *testing.T) {
 		t.Fatal("storage should be the explicit one")
 	}
 	if scheme.config.Salt != "0xfeed" {
-		t.Fatalf("salt = %s", scheme.config.Salt)
+		t.Fatal("salt override not stored")
 	}
 	if scheme.config.PayerAuthorizer != "0xPA" {
 		t.Fatalf("payerAuthorizer = %s", scheme.config.PayerAuthorizer)
@@ -198,6 +202,9 @@ func TestBuildChannelConfig_DefaultsAndOverrides(t *testing.T) {
 	}
 	if config.WithdrawDelay != DefaultWithdrawDelay {
 		t.Fatalf("withdrawDelay = %d", config.WithdrawDelay)
+	}
+	if config.Salt != DefaultSalt {
+		t.Fatalf("salt = %s", config.Salt)
 	}
 }
 
@@ -259,6 +266,158 @@ func TestBuildChannelConfig_ExplicitPayerAuthorizer(t *testing.T) {
 	}
 	if cfg.Payer != "0xSIG" {
 		t.Fatalf("payer = %s", cfg.Payer)
+	}
+}
+
+func TestBuildChannelConfig_RespectsCustomSaltFromOptions(t *testing.T) {
+	salt := "0xabc1230000000000000000000000000000000000000000000000000000000099"
+	scheme := NewBatchSettlementEvmScheme(&mockSigner{address: "0x1"}, &BatchSettlementEvmSchemeOptions{Salt: salt})
+	cfg, err := scheme.BuildChannelConfig(defaultRequirements())
+	if err != nil {
+		t.Fatalf("BuildChannelConfig: %v", err)
+	}
+	if cfg.Salt != salt {
+		t.Fatalf("salt = %s", cfg.Salt)
+	}
+}
+
+func TestBuildChannelConfig_PacksRefundAuthorizerIntoSalt(t *testing.T) {
+	salt := "0xabc1230000000000000000000000000000000000000000000000000000000099"
+	refundAuthorizer := "0xaaaabbbbccccddddeeeeffffaaaabbbbccccdddd"
+	scheme := NewBatchSettlementEvmScheme(&mockSigner{address: "0x1"}, &BatchSettlementEvmSchemeOptions{Salt: salt})
+	req := defaultRequirements()
+	req.Extra["voucherManager"] = batchsettlement.VoucherManagerFacilitator
+	req.Extra["refundAuthorizer"] = refundAuthorizer
+	cfg, err := scheme.BuildChannelConfig(req)
+	if err != nil {
+		t.Fatalf("BuildChannelConfig: %v", err)
+	}
+	want, err := batchsettlement.PackRefundAuthorizerSalt(salt, refundAuthorizer)
+	if err != nil {
+		t.Fatalf("PackRefundAuthorizerSalt: %v", err)
+	}
+	if cfg.Salt != want {
+		t.Fatalf("salt = %s, want %s", cfg.Salt, want)
+	}
+	if got := batchsettlement.UnpackRefundAuthorizer(cfg.Salt); !strings.EqualFold(got, refundAuthorizer) {
+		t.Fatalf("unpack refund authorizer = %s", got)
+	}
+}
+
+func TestBuildChannelConfig_SelfManagedNeverPacksSalt(t *testing.T) {
+	salt := "0xabc1230000000000000000000000000000000000000000000000000000000099"
+	refundAuthorizer := "0xaaaabbbbccccddddeeeeffffaaaabbbbccccdddd"
+	scheme := NewBatchSettlementEvmScheme(&mockSigner{address: "0x1"}, &BatchSettlementEvmSchemeOptions{Salt: salt})
+
+	base, err := scheme.BuildChannelConfig(defaultRequirements())
+	if err != nil {
+		t.Fatalf("BuildChannelConfig: %v", err)
+	}
+	baseId, err := batchsettlement.ComputeChannelId(base, testNetwork)
+	if err != nil {
+		t.Fatalf("ComputeChannelId: %v", err)
+	}
+
+	cases := map[string]map[string]interface{}{
+		"voucherManager omitted":     {"refundAuthorizer": refundAuthorizer},
+		"voucherManager server":      {"voucherManager": batchsettlement.VoucherManagerServer, "refundAuthorizer": refundAuthorizer},
+		"facilitator without refund": {"voucherManager": batchsettlement.VoucherManagerFacilitator},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := defaultRequirements()
+			for k, v := range extra {
+				req.Extra[k] = v
+			}
+			cfg, err := scheme.BuildChannelConfig(req)
+			if err != nil {
+				t.Fatalf("BuildChannelConfig: %v", err)
+			}
+			if cfg.Salt != salt {
+				t.Fatalf("salt = %s, want the raw salt %s", cfg.Salt, salt)
+			}
+			id, err := batchsettlement.ComputeChannelId(cfg, testNetwork)
+			if err != nil {
+				t.Fatalf("ComputeChannelId: %v", err)
+			}
+			if !strings.EqualFold(id, baseId) {
+				t.Fatalf("channelId = %s, want unchanged %s", id, baseId)
+			}
+		})
+	}
+}
+
+func TestBuildChannelConfig_PackedSaltsYieldDistinctChannelIds(t *testing.T) {
+	refundAuthorizer := "0xaaaabbbbccccddddeeeeffffaaaabbbbccccdddd"
+	req := defaultRequirements()
+	req.Extra["voucherManager"] = batchsettlement.VoucherManagerFacilitator
+	req.Extra["refundAuthorizer"] = refundAuthorizer
+	saltA := "0x0000000000000000000000000000000000000000000000000000000000000011"
+	saltB := "0x0000000000000000000000000000000000000000000000000000000000000012"
+	schemeA := NewBatchSettlementEvmScheme(&mockSigner{address: "0x1"}, &BatchSettlementEvmSchemeOptions{Salt: saltA})
+	schemeB := NewBatchSettlementEvmScheme(&mockSigner{address: "0x1"}, &BatchSettlementEvmSchemeOptions{Salt: saltB})
+	cfgA, err := schemeA.BuildChannelConfig(req)
+	if err != nil {
+		t.Fatalf("BuildChannelConfig A: %v", err)
+	}
+	cfgB, err := schemeB.BuildChannelConfig(req)
+	if err != nil {
+		t.Fatalf("BuildChannelConfig B: %v", err)
+	}
+	if cfgA.Salt == cfgB.Salt {
+		t.Fatal("expected distinct packed salts")
+	}
+	idA, err := batchsettlement.ComputeChannelId(cfgA, testNetwork)
+	if err != nil {
+		t.Fatalf("ComputeChannelId A: %v", err)
+	}
+	idB, err := batchsettlement.ComputeChannelId(cfgB, testNetwork)
+	if err != nil {
+		t.Fatalf("ComputeChannelId B: %v", err)
+	}
+	if strings.EqualFold(idA, idB) {
+		t.Fatalf("expected distinct channel ids, got %s", idA)
+	}
+}
+
+func TestNewBatchSettlementEvmScheme_NormalizesNumericAndShortHexSalt(t *testing.T) {
+	padded := "0x0000000000000000000000000000000000000000000000000000000000000001"
+	for _, salt := range []string{
+		"1",
+		"0x1",
+		"0X1",
+		" 1 ",
+		padded,
+	} {
+		scheme := NewBatchSettlementEvmScheme(&mockSigner{address: "0x1"}, &BatchSettlementEvmSchemeOptions{Salt: salt})
+		cfg, err := scheme.BuildChannelConfig(defaultRequirements())
+		if err != nil {
+			t.Fatalf("salt %q: %v", salt, err)
+		}
+		if cfg.Salt != padded {
+			t.Fatalf("salt = %q, want %q", cfg.Salt, padded)
+		}
+	}
+
+	zero := "0x0000000000000000000000000000000000000000000000000000000000000000"
+	for _, salt := range []string{"", " ", "0", DefaultSalt, "0x0"} {
+		scheme := NewBatchSettlementEvmScheme(&mockSigner{address: "0x1"}, &BatchSettlementEvmSchemeOptions{Salt: salt})
+		cfg, err := scheme.BuildChannelConfig(defaultRequirements())
+		if err != nil {
+			t.Fatalf("salt %q: %v", salt, err)
+		}
+		if cfg.Salt != zero {
+			t.Fatalf("salt = %q, want %q", cfg.Salt, zero)
+		}
+	}
+}
+
+func TestNewBatchSettlementEvmScheme_RejectsInvalidSaltString(t *testing.T) {
+	for _, salt := range []string{"0xzz", "abc", "-1", "1.5"} {
+		scheme := NewBatchSettlementEvmScheme(&mockSigner{address: "0x1"}, &BatchSettlementEvmSchemeOptions{Salt: salt})
+		if _, err := scheme.BuildChannelConfig(defaultRequirements()); err == nil {
+			t.Fatalf("salt %q: expected error", salt)
+		}
 	}
 }
 
@@ -1358,6 +1517,129 @@ func TestProcessCorrective_RecoverFromSignatureChargedBeyondSigned(t *testing.T)
 	if ok {
 		t.Fatal("charged > signed should refuse")
 	}
+}
+
+func TestProcessCorrective_RejectsContractRejectedSignatureForms(t *testing.T) {
+	key, err := crypto.HexToECDSA("59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := crypto.PubkeyToAddress(key.PublicKey).Hex()
+	req := defaultRequirements()
+	probe := NewBatchSettlementEvmScheme(&readSigner{
+		mockSigner: &mockSigner{address: addr},
+		readResult: []interface{}{big.NewInt(10000), big.NewInt(0)},
+	}, nil)
+	channelId := localChannelId(t, probe, req)
+	canonical := signRecoveryVoucher(t, key, channelId, "2000", testNetwork)
+
+	cases := []struct {
+		name string
+		sig  string
+		want bool
+	}{
+		{name: "canonical", sig: canonical, want: true},
+		{name: "high-s", sig: highSSignature(canonical), want: false},
+		{name: "v=0/1", sig: yParitySignature(canonical), want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := NewInMemoryClientChannelStorage()
+			signer := &readSigner{
+				mockSigner: &mockSigner{address: addr},
+				readResult: []interface{}{big.NewInt(10000), big.NewInt(0)},
+			}
+			scheme := NewBatchSettlementEvmScheme(signer, &BatchSettlementEvmSchemeOptions{Storage: storage})
+			gotReq := defaultRequirements()
+			gotReq.Extra["channelState"] = map[string]interface{}{"chargedCumulativeAmount": "1000"}
+			gotReq.Extra["voucherState"] = map[string]interface{}{
+				"signedMaxClaimable": "2000",
+				"signature":          tc.sig,
+			}
+			ok, recErr := scheme.ProcessCorrectivePaymentRequired(
+				context.Background(),
+				batchsettlement.ErrCumulativeAmountMismatch,
+				[]types.PaymentRequirements{gotReq},
+			)
+			if recErr != nil || ok != tc.want {
+				t.Fatalf("got (%v, %v), want ok=%v", ok, recErr, tc.want)
+			}
+			stored, storeErr := storage.Get(channelId)
+			if storeErr != nil {
+				t.Fatal(storeErr)
+			}
+			if tc.want {
+				if stored == nil || stored.Signature != tc.sig || stored.ChargedCumulativeAmount != "1000" {
+					t.Fatalf("stored %+v", stored)
+				}
+				return
+			}
+			if stored != nil {
+				t.Fatalf("rejected signature was stored: %+v", stored)
+			}
+		})
+	}
+}
+
+func signRecoveryVoucher(t *testing.T, key *ecdsa.PrivateKey, channelId, amount, network string) string {
+	t.Helper()
+	chainID, err := evm.GetEvmChainId(network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxClaimable, ok := new(big.Int).SetString(amount, 10)
+	if !ok {
+		t.Fatalf("amount %s", amount)
+	}
+	channelIdBytes, err := evm.HexToBytes(channelId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := evm.HashEIP712TypedData(
+		batchsettlement.GetBatchSettlementEip712Domain(chainID),
+		batchsettlement.VoucherTypes,
+		"Voucher",
+		map[string]interface{}{
+			"channelId":          channelIdBytes,
+			"maxClaimableAmount": maxClaimable,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := crypto.Sign(hash[:], key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig[64] += 27
+	return "0x" + hex.EncodeToString(sig)
+}
+
+func highSSignature(sig string) string {
+	raw := append([]byte(nil), mustSigBytes(sig)...)
+	s := new(big.Int).SetBytes(raw[32:64])
+	s.Sub(crypto.S256().Params().N, s)
+	s.FillBytes(raw[32:64])
+	if raw[64] == 27 {
+		raw[64] = 28
+	} else {
+		raw[64] = 27
+	}
+	return "0x" + hex.EncodeToString(raw)
+}
+
+func yParitySignature(sig string) string {
+	raw := append([]byte(nil), mustSigBytes(sig)...)
+	raw[64] -= 27
+	return "0x" + hex.EncodeToString(raw)
+}
+
+func mustSigBytes(sig string) []byte {
+	raw, err := hex.DecodeString(strings.TrimPrefix(sig, "0x"))
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 func TestProcessCorrective_RecoverFromSignatureNoReadCapability(t *testing.T) {

@@ -83,6 +83,15 @@ DEFAULT_ASSETS: dict[str, list[ExactDefaultAssetInfo]] = {
             "symbol": "USDC",
         },
     ],  # Monad mainnet USDC
+    "eip155:10143": [
+        {
+            "asset": "0x534b2f3A21130d7a60830c2Df862319e593943A3",
+            "name": "USDC",
+            "version": "2",
+            "decimals": 6,
+            "symbol": "USDC",
+        },
+    ],  # Monad testnet USDC
     "eip155:988": [
         {
             "asset": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
@@ -118,7 +127,15 @@ DEFAULT_ASSETS: dict[str, list[ExactDefaultAssetInfo]] = {
             "decimals": 6,
             "symbol": "USDC",
         },
-    ],  # Arbitrum One USDC
+        {
+            "asset": "0xD74f5255D557944cf7Dd0E45FF521520002D5748",
+            "name": "Sperax USD",
+            "version": "1",
+            "decimals": 18,
+            "symbol": "USDs",
+            "asset_transfer_method": "permit2",
+        },
+    ],  # Arbitrum One USDC; Sperax USD is Permit2 only (no EIP-3009, permit does not set allowances)
     "eip155:421614": [
         {
             "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
@@ -286,6 +303,70 @@ DEFAULT_ASSETS: dict[str, list[ExactDefaultAssetInfo]] = {
             "symbol": "USDC",
         },
     ],  # Sei testnet USDC (EIP-3009 supported)
+    "eip155:5042": [
+        {
+            "asset": "0x3600000000000000000000000000000000000000",
+            "name": "USDC",
+            "version": "2",
+            "decimals": 6,
+            "symbol": "USDC",
+        },
+    ],  # Arc mainnet USDC (EIP-3009 supported)
+    "eip155:5042002": [
+        {
+            "asset": "0x3600000000000000000000000000000000000000",
+            "name": "USDC",
+            "version": "2",
+            "decimals": 6,
+            "symbol": "USDC",
+        },
+    ],  # Arc Testnet USDC (EIP-3009 supported)
+    "eip155:4663": [
+        {
+            "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+            "name": "Global Dollar",
+            "version": "1",
+            "decimals": 6,
+            "symbol": "USDG",
+        },
+    ],  # Robinhood Chain mainnet USDG (EIP-3009 supported)
+    "eip155:43111": [
+        {
+            "asset": "0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA",
+            "name": "Bridged USDC (Stargate)",
+            "version": "2",
+            "decimals": 6,
+            "symbol": "USDC.e",
+        },
+    ],  # Hemi mainnet USDC.e (EIP-3009 supported)
+    "eip155:743111": [
+        {
+            "asset": "0xD47971C7F5B1067d25cd45d30b2c9eb60de96443",
+            "name": "USDC.e",
+            "version": "1",
+            "decimals": 6,
+            "symbol": "USDC.e",
+            "asset_transfer_method": "permit2",
+        },
+    ],  # Hemi testnet USDC.e (no EIP-3009, no EIP-2612)
+    "eip155:480": [
+        {
+            "asset": "0x79A02482A880bCE3F13e09Da970dC34db4CD24d1",
+            "name": "USDC",
+            "version": "2",
+            "decimals": 6,
+            "symbol": "USDC",
+        },
+    ],  # World Chain USDC
+    "eip155:4801": [
+        {
+            "asset": "0x66145f38cBAC35Ca6F1Dfb4914dF98F1614aeA88",
+            "name": "USDC",
+            "version": "2",
+            "decimals": 6,
+            "symbol": "USDC",
+        },
+    ],  # World Chain Sepolia USDC
 }
 
 

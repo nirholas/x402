@@ -37,7 +37,12 @@ from ..errors import (
     ERR_WITHDRAW_DELAY_OUT_OF_RANGE,
 )
 from ..types import ChannelConfig, ChannelState
-from ..utils import coerce_bytes32, compute_channel_id, get_batch_settlement_eip712_domain
+from ..utils import (
+    coerce_bytes32,
+    compute_channel_id,
+    get_batch_settlement_eip712_domain,
+    is_contract_recoverable_signature,
+)
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
@@ -109,10 +114,15 @@ def verify_batch_settlement_voucher_typed_data(
         "maxClaimableAmount": int(max_claimable_amount),
     }
 
-    sig_bytes = _signature_to_bytes(signature)
+    try:
+        sig_bytes = _signature_to_bytes(signature)
+    except ValueError:
+        return False
     is_zero = int(payer_authorizer, 16) == 0
 
     if not is_zero:
+        if not is_contract_recoverable_signature(sig_bytes):
+            return False
         try:
             signable = encode_typed_data(
                 domain_data=domain,
@@ -134,6 +144,7 @@ def verify_batch_settlement_voucher_typed_data(
             primary_type="Voucher",
             message=message,
             signature=sig_bytes,
+            eoa_signature_check=is_contract_recoverable_signature,
         )
     except Exception:
         return False
@@ -220,6 +231,18 @@ def read_channel_state(signer: FacilitatorEvmSigner, channel_id: str) -> Channel
     )
 
 
+def parse_requirements_amount(amount: Any) -> int | None:
+    """Parse the server-supplied ``requirements.amount`` as a non-negative base-10 integer.
+
+    The amount comes from the resource server, so the facilitator must not trust it: malformed
+    or negative values (which would lower the minimum-advance floor) yield ``None`` instead of
+    raising or being accepted.
+    """
+    if isinstance(amount, str) and amount.isascii() and amount.isdigit():
+        return int(amount)
+    return None
+
+
 def _unpack_pair(value: Any) -> tuple[int, int]:
     if isinstance(value, list | tuple) and len(value) >= 2:
         return int(value[0]), int(value[1])
@@ -234,4 +257,5 @@ __all__ = [
     "verify_batch_settlement_voucher_typed_data",
     "validate_channel_config",
     "read_channel_state",
+    "parse_requirements_amount",
 ]
